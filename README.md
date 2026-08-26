@@ -1,1 +1,473 @@
-# renfild
+# Renfild
+
+[![Release](https://img.shields.io/github/v/release/t0mer/renfild?sort=semver)](https://github.com/t0mer/renfild/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://github.com/t0mer/renfild/actions/workflows/ci.yml/badge.svg)](https://github.com/t0mer/renfild/actions/workflows/ci.yml)
+
+A self-hosted voice assistant that runs on a Raspberry Pi and **knows who is talking to it**.
+
+Renfild listens for a wake word you trained yourself, works out *which member of the
+household* said it from the sound of their voice, and only then decides what to do.
+Speech-to-text, speaker recognition, the language model and the voice all run on your own
+hardware. Nothing leaves your network.
+
+- 🎙️ **Custom wake word** — an [openWakeWord](https://github.com/dscripka/openWakeWord) model you train yourself.
+- 🧑‍🤝‍🧑 **Speaker recognition** — ECAPA-TDNN voice embeddings; every intent has a permission floor.
+- 🧠 **Rules first, LLM second** — a deterministic rule table you own, with a local Ollama fallback.
+- 🔒 **Local only** — no cloud, no telemetry, no Home Assistant dependency. Raw audio is not stored by default.
+- 📦 **No Docker** — three systemd units, one installer, native on Raspberry Pi OS.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph PI["Raspberry Pi 4"]
+        MIC["🎙️ USB microphone"] --> SAT
+        SAT["<b>satellite</b><br/>Python daemon<br/>openWakeWord + Silero VAD"]
+        SRV["<b>server</b><br/>Go binary<br/>pipeline · SQLite · web UI"]
+        EMB["<b>embedder</b><br/>Python sidecar<br/>ECAPA-TDNN"]
+        PIPER["piper<br/>(subprocess)"]
+        SPK["🔊 USB soundcard"]
+    end
+
+    subgraph EXT["Elsewhere on the LAN (or the same Pi)"]
+        WHISPER["Whisper<br/>speech to text"]
+        OLLAMA["Ollama<br/>local LLM"]
+    end
+
+    SAT -- "wake.wav + command.wav<br/>POST /api/v1/utterance" --> SRV
+    SRV -- "who is this?" --> EMB
+    SRV -- "what did they say?" --> WHISPER
+    SRV -- "no rule matched" --> OLLAMA
+    SRV -- "say this" --> PIPER
+    SRV -- "reply.wav" --> SAT
+    SAT --> SPK
+
+    style SRV fill:#6d4aff,color:#fff
+    style SAT fill:#2b8a5a,color:#fff
+    style EMB fill:#2b6ea8,color:#fff
+```
+
+One utterance, end to end:
+
+1. The satellite keeps the **last 2 seconds** of microphone audio in a ring buffer at all times.
+2. The wake word fires → that 2-second snapshot becomes `wake.wav`, and a chirp plays immediately.
+3. Silero VAD records the command until **700 ms of silence** (or 10 s, whichever comes first).
+4. The server embeds `wake.wav` and transcribes `command.wav` **concurrently**.
+5. The embedding is matched against every enrolled speaker by cosine similarity.
+6. The intent router walks the rule table by priority; the first enabled match that clears the
+   speaker's role floor wins. No match → the local LLM, if you have enabled it.
+7. Piper speaks the reply. Everything — speaker, scores, transcript, intent, per-stage latency —
+   lands in the history table.
+
+---
+
+## Hardware
+
+| Part | What I use | Notes |
+|---|---|---|
+| Computer | Raspberry Pi 4, 4 GB, arm64 | Raspberry Pi OS (Debian 13). A Pi 5 is faster but not required. |
+| Microphone | Any USB microphone or conference mic | Must appear in `arecord -L`. A far-field mic makes a big difference. |
+| Speaker | USB soundcard + powered speaker | The Pi's headphone jack works, but sounds worse. |
+| Storage | 32 GB SD card or better | PyTorch alone takes ~1.5 GB. |
+| Elsewhere | A host running Whisper and Ollama | Optional — both can run on the Pi, just slower. |
+
+---
+
+## Quickstart
+
+```bash
+git clone https://github.com/t0mer/renfild.git
+cd renfild
+sudo ./install.sh
+```
+
+The installer creates the `renfild` system user, builds the Python virtualenvs, downloads
+Piper and a voice, installs three systemd units and starts them. It is idempotent — re-run
+it to upgrade, and it will never overwrite a config file you have edited.
+
+Then:
+
+1. **Drop in your wake word model** — `/opt/renfild/satellite/models/`, and point
+   `wake.model_path` in `/opt/renfild/etc/satellite.yaml` at it (see [Training a wake word](#training-a-wake-word)).
+2. **Pick your audio devices** — `arecord -L` and `aplay -L` list them; set
+   `audio.input_device` / `audio.output_device` to a distinctive part of the name.
+3. **Point at Whisper and Ollama** — `/opt/renfild/etc/server.yaml`.
+4. **Open the web UI** — `http://<pi>:8080` — and enroll yourself under **Speakers**.
+
+```bash
+systemctl status renfild-server renfild-embedder renfild-satellite
+journalctl -u renfild-satellite -f      # watch it hear you
+```
+
+### Building from source
+
+Everything builds natively on the Pi; there is no cross-compilation step and no Docker.
+
+```bash
+make venvs        # Python virtualenvs for the satellite and embedder
+make web          # build the React UI into the Go embed directory
+make build        # build ./server/renfild with the UI embedded
+make test         # Go + Python test suites
+make e2e          # end-to-end pipeline check with mocked external services
+```
+
+---
+
+## Components
+
+### satellite (Python)
+
+The always-on ear. Captures 16 kHz mono audio in 80 ms frames, runs openWakeWord on every
+frame, records the command with Silero VAD and ships both WAVs to the server.
+
+```bash
+# See what audio devices exist
+/opt/renfild/satellite/.venv/bin/python -m satellite --list-devices
+
+# Tune the wake word by ear: capture to disk, never contact the server
+/opt/renfild/satellite/.venv/bin/python -m satellite --offline --dump-dir /tmp/renfild
+```
+
+### embedder (Python)
+
+One job: audio in, a 192-dimension voice embedding out. It exists because SpeechBrain's
+ECAPA-TDNN model is Python-only — all the matching logic lives in the Go server.
+
+```bash
+curl -s --data-binary @sample.wav -H 'Content-Type: audio/wav' \
+  http://127.0.0.1:8100/embed | head -c 200
+```
+
+> **Note** SpeechBrain pulls in PyTorch. On arm64 the installer uses the **CPU-only** wheels
+> from PyTorch's own index (~1.5 GB on disk) — the default PyPI wheels drag in several
+> gigabytes of NVIDIA CUDA packages that are useless on a Pi. The ECAPA model (~80 MB) is
+> downloaded on first start into `/opt/renfild/embedder/models` and everything runs offline
+> after that.
+
+### server (Go)
+
+The brain: speaker ID → speech to text → intent → speech. Owns the SQLite database and
+serves the web UI from inside the binary (`CGO_ENABLED=0`, nothing to install but the file).
+
+---
+
+## The web UI
+
+Everything is configurable from the browser at `http://<pi>:8080`. The UI is embedded in the
+server binary — there is nothing else to deploy — and follows your system's light/dark
+preference, with a toggle in the navbar.
+
+### Dashboard
+
+Live utterances over Server-Sent Events, per-stage latency, and who has been talking.
+
+![Dashboard](assets/screenshots/dashboard.png)
+![Dashboard in dark mode](assets/screenshots/dashboard-dark.png)
+
+### Speakers
+
+Who is enrolled, how many samples each of them has, and the "test my voice" panel.
+
+![Speakers](assets/screenshots/speakers.png)
+![Speakers in dark mode](assets/screenshots/speakers-dark.png)
+
+The enrollment wizard itself is covered under [Enrolling a speaker](#enrolling-a-speaker).
+
+### Intents
+
+The rule table, in priority order, with a dry-run box that routes a phrase as if a given
+person had said it.
+
+![Intents](assets/screenshots/intents.png)
+![Intents in dark mode](assets/screenshots/intents-dark.png)
+
+### History
+
+Every utterance with its speaker scores, transcript, intent, reply and per-stage timings.
+This is the page you tune thresholds from.
+
+![History](assets/screenshots/history.png)
+![History in dark mode](assets/screenshots/history-dark.png)
+
+### Settings
+
+Thresholds and policies apply immediately and survive a restart; the values that come from
+the config file are shown read-only.
+
+![Settings](assets/screenshots/settings.png)
+![Settings in dark mode](assets/screenshots/settings-dark.png)
+
+---
+
+## Training a wake word
+
+Renfild does not ship a wake word — you train your own, which is what makes it *yours*.
+
+1. Open the [openWakeWord training notebook](https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb)
+   in Google Colab (from the [openWakeWord repository](https://github.com/dscripka/openWakeWord)).
+2. Pick a phrase of **three or four syllables** that does not occur in normal conversation.
+   Two-syllable words produce constant false triggers.
+3. Run the notebook. It synthesises thousands of samples of your phrase and trains a small
+   model, then hands you `.tflite` and `.onnx` files.
+4. Copy either file to `/opt/renfild/satellite/models/` and set `wake.model_path`. The
+   inference backend is chosen from the file extension — both work.
+5. Restart and watch: `journalctl -u renfild-satellite -f`. Adjust `wake.threshold`
+   (default `0.6`) until it fires reliably for you but not for the television.
+
+> On CPython 3.12 and newer there is no `tflite-runtime` wheel; the satellite transparently
+> uses Google's `ai-edge-litert` interpreter instead, so `.tflite` models still work.
+
+---
+
+## Enrolling a speaker
+
+Enrollment teaches Renfild what you sound like. **Speakers → Add**, then **Enroll**, and the
+wizard walks through five prompts: the wake word twice, two fixed sentences and one free
+sentence. Record from where you normally stand, at your normal volume.
+
+Each sample is embedded and compared with the ones already collected. A recording that does
+not resemble the others — a cough, a slammed door, someone else talking over you — is
+rejected on the spot with the similarity score, so bad samples never reach the voice print.
+
+The **Test my voice** panel records a few seconds and shows what Renfild thinks, with the
+score for every enrolled speaker. Nothing is stored.
+
+![Enrollment wizard](assets/screenshots/enrollment.png)
+
+### Threshold tuning
+
+The default threshold is a **cosine similarity of 0.45**. It will need adjusting for your
+household and your microphone — this is normal and expected.
+
+| What you see | What it means | What to do |
+|---|---|---|
+| You are often `unknown` | Threshold is too high for your mic | Lower it by 0.05 at a time |
+| Someone else is recognised as you | Voices are too close, or too few samples | Raise the threshold; enroll more samples for both |
+| Scores hover around 0.40–0.50 for everyone | Noisy or distant microphone | Move the mic; enroll from where you actually speak |
+| One person is always wrong | That person's samples are poor | Delete the low-similarity samples and re-record |
+
+Every utterance logs the **best and runner-up scores** — the History page is where you tune.
+The gap between the two matters more than the absolute numbers.
+
+---
+
+## Intents
+
+Rules are checked from the top down; the first enabled rule that matches wins.
+
+| Field | Meaning |
+|---|---|
+| `match_type` | `exact`, `contains` or `regex` (case-insensitive; Hebrew is handled as-is) |
+| `patterns` | One or more phrases; any of them matching fires the rule |
+| `min_role` | Permission floor: `any` < `kid` < `member` < `owner` |
+| `handler` | `reply`, `webhook` or `llm` |
+| `priority` | Lower runs first |
+
+Handler configuration is JSON:
+
+```jsonc
+// reply — a Go text/template
+{ "template": "Good morning {{.Speaker}}. It is {{.Now.Format \"15:04\"}}." }
+
+// webhook — call something, optionally speak its answer
+{ "url": "http://nas:8123/api/x", "method": "POST",
+  "headers": { "X-Token": "…" },
+  "body": "{\"who\":\"{{.Speaker}}\"}",
+  "speak_response": true }
+
+// llm — ask the local model, with the speaker's name and role in context
+{ "system_prompt": "You are a terse butler.", "max_words": 40 }
+```
+
+Templates get `{{.Speaker}}`, `{{.Role}}`, `{{.Transcript}}`, `{{.SatelliteID}}`,
+`{{.Confidence}}`, `{{.Known}}` and `{{.Now}}`.
+
+**Unknown voices** are governed by `speaker.unknown_policy`:
+
+| Policy | Behaviour |
+|---|---|
+| `restricted` (default) | Only intents with `min_role: any` run; anything else gets *"Sorry, I don't recognize your voice."* |
+| `deny` | An unrecognised voice gets no response at all |
+| `allow` | Treated as a `member` — convenient, and exactly as safe as that sounds |
+
+---
+
+## Configuration reference
+
+Precedence everywhere: **flags > environment > config file > defaults**.
+
+### server — `/opt/renfild/etc/server.yaml` (env prefix `RENFILD_`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `listen` | `:8080` | Listen address. Bind to `127.0.0.1:8080` if you put a proxy in front. |
+| `db` | `/var/lib/renfild/renfild.db` | SQLite database |
+| `log_level` | `info` | `debug`, `info`, `warn`, `error` |
+| `audio_retention` | `none` | `none`, `24h`, `7d` — raw audio retention for debugging |
+| `audio_dir` | `/var/lib/renfild/audio` | Where retained audio is written |
+| `whisper.url` | `http://127.0.0.1:9000` | Whisper endpoint |
+| `whisper.api` | `openai` | `openai` (`/v1/audio/transcriptions`) or `asr` (whisper-asr-webservice) |
+| `whisper.model` | `whisper-1` | Model name, for the OpenAI shape |
+| `whisper.language` | `auto` | `he`, `en`, … or `auto` |
+| `whisper.timeout` | `20s` | Per-request timeout |
+| `embedder.url` | `http://127.0.0.1:8100` | Embedder sidecar |
+| `ollama.url` | `http://127.0.0.1:11434` | Ollama endpoint |
+| `ollama.model` | `qwen2.5:7b` | Model for the `llm` handler |
+| `ollama.max_words` | `60` | Hard cap on spoken answers |
+| `ollama.fallback` | `true` | Route unmatched transcripts to the model |
+| `ollama.system_prompt_file` | — | Optional file with your own system prompt |
+| `piper.binary` | `/opt/renfild/piper/piper` | Piper executable |
+| `piper.voice` | `…/en_US-lessac-medium.onnx` | Voice model |
+| `piper.speaker_id` | `0` | For multi-speaker voices |
+| `speaker.default_threshold` | `0.45` | Cosine similarity floor |
+| `speaker.unknown_policy` | `restricted` | See the table above |
+| `speaker.low_confidence_margin` | `0.05` | Within this of the threshold, the command audio also gets a vote |
+| `speaker.enrollment_samples` | `5` | Prompts in the enrollment wizard |
+| `speaker.min_sample_similarity` | `0.30` | Enrollment samples below this are rejected |
+
+Flags: `--listen --db --log-level --audio-retention --audio-dir --whisper-url --whisper-api
+--whisper-language --embedder-url --ollama-url --ollama-model --piper-binary --piper-voice
+--speaker-threshold --unknown-policy --config`.
+
+### satellite — `/opt/renfild/etc/satellite.yaml` (env prefix `RENFILD_SAT_`, nested keys use `__`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `satellite_id` | `living-room` | Identifies this satellite in history and metrics |
+| `server.url` | `http://127.0.0.1:8080` | Where the brain lives |
+| `server.timeout_s` | `15` | Request timeout |
+| `audio.input_device` | `USB` | **Name substring**, never an index — indexes move between reboots |
+| `audio.output_device` | `USB` | Same, for playback |
+| `audio.sample_rate` | `16000` | Fixed by the models |
+| `audio.frame_ms` | `80` | 1280 samples — openWakeWord's chunk size |
+| `audio.ring_seconds` | `2.0` | Snapshot handed to speaker identification |
+| `wake.model_path` | `models/renfild.onnx` | Your trained wake word (`.onnx` or `.tflite`) |
+| `wake.threshold` | `0.6` | Raise it if the TV sets it off |
+| `wake.debounce_s` | `3.0` | Suppress re-triggers after a detection |
+| `vad.model_path` | `models/silero_vad.onnx` | Silero VAD; falls back to an energy gate if missing |
+| `vad.trailing_silence_ms` | `700` | End-of-command silence |
+| `vad.max_command_s` | `10.0` | Hard cap on one command |
+| `vad.start_timeout_s` | `4.0` | No speech within this → false trigger, abort quietly |
+| `chimes.enabled` | `true` | Local feedback sounds (synthesised, no files needed) |
+| `dump_dir` | — | Write `wake.wav`/`command.wav` for every detection |
+| `offline` | `false` | Capture and dump only; never contact the server |
+
+Example: `RENFILD_SAT_WAKE__THRESHOLD=0.7` overrides `wake.threshold`.
+
+### embedder — `/opt/renfild/etc/embedder.env` (env prefix `RENFILD_EMB_`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `HOST` / `PORT` | `127.0.0.1` / `8100` | Bind address — localhost by default, since only the server talks to it |
+| `MODEL_SOURCE` | `speechbrain/spkrec-ecapa-voxceleb` | HuggingFace id or a local directory |
+| `MODEL_DIR` | `models/spkrec-ecapa-voxceleb` | Weight cache; offline after the first start |
+| `TORCH_THREADS` | `3` | Leave a core for the rest of the stack |
+| `MIN_DURATION_S` | `0.5` | Shorter audio is rejected with 422 |
+| `STUB` | `false` | Serve fake embeddings (tests only) |
+
+---
+
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/utterance` | Satellite endpoint. `multipart/form-data`: `wake`, `command`, `satellite_id`. Returns `200` + `audio/wav`, or `204` when there is nothing to say. Headers: `X-Speaker`, `X-Transcript`, `X-Intent`, `X-Confidence` (percent-encoded UTF-8). |
+| `GET` | `/healthz` | Liveness, with the version |
+| `GET` | `/metrics` | Prometheus: utterance counts by speaker/intent/outcome, per-stage latency histograms, match-confidence histogram |
+| `GET/POST/PUT/DELETE` | `/api/ui/speakers…` | Speaker and enrollment management |
+| `POST` | `/api/ui/speakers/identify` | "Test my voice" — embed and match, storing nothing |
+| `GET/POST/PUT/DELETE` | `/api/ui/intents…` | Rule table CRUD, plus `/reorder` |
+| `GET` | `/api/ui/history` | Utterance history with paging, search and filters |
+| `GET` | `/api/ui/events` | Server-Sent Events stream of live utterances |
+| `GET/PUT` | `/api/ui/settings` | Runtime settings (thresholds, policies, LLM fallback) |
+| `POST` | `/api/ui/test/tts` · `/api/ui/test/intent` | Dry runs for the UI |
+
+---
+
+## Privacy
+
+- Everything runs on your LAN. Nothing is sent anywhere at runtime; the only downloads are
+  models, at install time.
+- **Raw audio is not stored by default** (`audio_retention: none`). Turn it on only while
+  debugging.
+- **Transcripts and voice embeddings are stored** in `/var/lib/renfild/renfild.db`. The
+  embeddings are 192 floats per speaker — not audio, but they are biometric data. Treat the
+  database accordingly.
+- **The web UI has no authentication in v1.** It assumes a trusted LAN. Do not expose port
+  8080 to the internet, and do not put it behind a tunnel without adding authentication in
+  front of it. Bind to `127.0.0.1` and use a reverse proxy with auth if you need remote access.
+- Webhook credentials configured in intents are stored in the database; keep it at `0640`
+  and owned by the `renfild` user, as the installer sets it.
+
+---
+
+## Troubleshooting
+
+**No audio devices / the satellite exits at startup**
+
+```bash
+arecord -L                 # capture devices
+aplay -L                   # playback devices
+sudo -u renfild /opt/renfild/satellite/.venv/bin/python -m satellite --list-devices
+```
+Set `audio.input_device` to a distinctive substring of the name (`"USB"`, `"Samson"`). If
+PortAudio itself is missing: `sudo apt install libportaudio2`.
+
+**The wake word never fires**
+
+Lower `wake.threshold` in steps of 0.05 and watch `journalctl -u renfild-satellite -f`.
+Record what the microphone actually hears with `--offline --dump-dir /tmp/renfild` and play
+the dumps back — if they are quiet or clipped, fix the gain with `alsamixer` first.
+
+**The wake word fires at the television**
+
+Raise `wake.threshold`, and consider retraining with a longer phrase. Three or four
+syllables is the sweet spot.
+
+**Everyone comes out as `unknown`**
+
+Check the scores on the History page. If the best match sits just under the threshold,
+lower `speaker.default_threshold`. If every score is below 0.30, the enrollment samples
+were probably recorded somewhere else — re-enroll from where you actually talk.
+
+**Replies are slow**
+
+The History page breaks every utterance down by stage. Typically:
+
+| Stage | Measured on a Pi 4 (4 GB) | If it is slow |
+|---|---|---|
+| `spk` (speaker ID) | ~1.0–1.5 s for the 2 s wake snapshot | ECAPA on a Pi 4 CPU is the most expensive stage. It runs concurrently with `stt`, so it is often not what you are waiting for — but if it is, move the embedder to a stronger host: `embedder.url` is just configuration. |
+| `stt` (Whisper) | 300–1200 ms, depending on the model and where it runs | Use a smaller model, or move it off the Pi |
+| `intent` | < 10 ms for rules, seconds for `llm` | An LLM reply is never going to be instant; keep `max_words` low |
+| `tts` (Piper) | 200–600 ms | A `low` quality voice is noticeably faster than `medium` |
+
+The embedder also spends 15–20 seconds loading ECAPA at startup. That happens once, at boot,
+not per utterance.
+
+**`piper: no such file or directory`**
+
+The server logs "text to speech is unavailable" at startup and keeps running. Re-run
+`sudo ./install.sh --skip-satellite --skip-embedder --skip-server` to fetch Piper, or
+install it by hand into `/opt/renfild/piper`.
+
+**The embedder takes forever to start**
+
+The first start downloads ~80 MB of model weights. `journalctl -u renfild-embedder -f`
+shows the progress; subsequent starts are offline and take a few seconds.
+
+---
+
+## Roadmap
+
+- Barge-in (interrupting playback by speaking) — deliberately out of scope for v1.
+- Multiple satellites. The protocol already carries `satellite_id`; the UI does not manage
+  them yet.
+- More intent handlers — MQTT and `exec` are one file each, by design.
+- Streaming speech to text.
+
+## License
+
+[Apache-2.0](LICENSE)
