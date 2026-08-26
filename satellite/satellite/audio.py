@@ -12,6 +12,7 @@ import queue
 import threading
 import wave
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -263,6 +264,72 @@ class Microphone:
                 self._queue.get_nowait()
             except queue.Empty:
                 return
+
+
+class FileMicrophone:
+    """Replays a WAV file as if it were the microphone.
+
+    This is how the wake word and the capture loop get tested on a machine with
+    no microphone attached — a headless Pi, or CI. After the file runs out it
+    emits a little trailing silence (so the VAD can close the command) and then
+    stops, which ends the daemon's loop.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        sample_rate: int,
+        frame_samples: int,
+        tail_silence_s: float = 3.0,
+        gain: float = 1.0,
+    ) -> None:
+        self.path = Path(path)
+        self.sample_rate = sample_rate
+        self.frame_samples = frame_samples
+        self.tail_silence_s = tail_silence_s
+        self.gain = gain
+        self._pcm = np.zeros(0, dtype=np.int16)
+
+    def __enter__(self) -> FileMicrophone:
+        samples, rate = wav_decode(self.path.read_bytes())
+        if rate != self.sample_rate:
+            logger.info("resampling {} from {} Hz to {} Hz", self.path.name, rate, self.sample_rate)
+            samples = resample(samples, rate, self.sample_rate)
+        if self.gain != 1.0:
+            samples = samples * self.gain
+        self._pcm = to_int16(samples)
+        logger.info(
+            "replaying {} ({:.2f}s) as microphone input",
+            self.path.name,
+            len(self._pcm) / self.sample_rate,
+        )
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._pcm = np.zeros(0, dtype=np.int16)
+
+    def frames(self) -> Iterator[np.ndarray]:
+        """Yield the file's frames, then trailing silence, then stop."""
+        for start in range(0, len(self._pcm) - self.frame_samples + 1, self.frame_samples):
+            yield self._pcm[start : start + self.frame_samples]
+        for _ in range(int(self.tail_silence_s * self.sample_rate / self.frame_samples)):
+            yield np.zeros(self.frame_samples, dtype=np.int16)
+
+    def flush(self) -> None:
+        """Nothing to drop: a file has no live queue."""
+
+
+class NullSpeaker:
+    """Swallows playback. Used with FileMicrophone so a test needs no soundcard."""
+
+    def play_wav(self, data: bytes) -> None:
+        logger.info("playback suppressed ({} bytes of audio)", len(data))
+
+    def play(self, samples: np.ndarray, sample_rate: int) -> None:
+        logger.debug("playback suppressed ({:.2f}s)", len(samples) / sample_rate)
 
 
 class Speaker:

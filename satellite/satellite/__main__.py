@@ -17,7 +17,16 @@ from pathlib import Path
 from loguru import logger
 
 from . import __version__, chimes, config, vad
-from .audio import AudioError, Microphone, RingBuffer, Speaker, find_device, wav_encode
+from .audio import (
+    AudioError,
+    FileMicrophone,
+    Microphone,
+    NullSpeaker,
+    RingBuffer,
+    Speaker,
+    find_device,
+    wav_encode,
+)
 from .client import ServerClient, ServerError
 from .wake import WakeWord
 
@@ -47,6 +56,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--dump-dir", type=Path, help="write wake.wav/command.wav here")
     parser.add_argument(
+        "--input-wav",
+        type=Path,
+        help="replay a WAV instead of opening the microphone, and do not play audio back "
+        "(for testing on a machine with no sound hardware)",
+    )
+    parser.add_argument(
         "--list-devices", action="store_true", help="print audio devices and exit"
     )
     parser.add_argument("--version", action="version", version=f"renfild-satellite {__version__}")
@@ -72,8 +87,9 @@ def _list_devices() -> int:
 class Satellite:
     """Wires the pieces together and runs the listen loop."""
 
-    def __init__(self, settings: config.Settings) -> None:
+    def __init__(self, settings: config.Settings, input_wav: Path | None = None) -> None:
         self.settings = settings
+        self.input_wav = input_wav
         self.running = True
         self.ring = RingBuffer(int(settings.audio.ring_seconds * settings.audio.sample_rate))
         self.wake = WakeWord(
@@ -103,9 +119,11 @@ class Satellite:
         settings = self.settings
         self.wake.load()
 
-        input_device = find_device(settings.audio.input_device, "input")
-        output_device = find_device(settings.audio.output_device, "output")
-        self.speaker = Speaker(device=output_device, volume=settings.audio.output_volume)
+        if self.input_wav is not None:
+            self.speaker = NullSpeaker()
+        else:
+            output_device = find_device(settings.audio.output_device, "output")
+            self.speaker = Speaker(device=output_device, volume=settings.audio.output_volume)
         self.chimes = chimes.ChimePlayer(
             self.speaker,
             enabled=settings.chimes.enabled,
@@ -132,12 +150,7 @@ class Satellite:
                     settings.server.url,
                 )
 
-        with Microphone(
-            sample_rate=settings.audio.sample_rate,
-            frame_samples=settings.frame_samples,
-            device=input_device,
-            gain=settings.audio.input_gain,
-        ) as mic:
+        with self._open_microphone() as mic:
             logger.info(
                 "listening as satellite '{}' (wake threshold {})",
                 settings.satellite_id,
@@ -145,7 +158,11 @@ class Satellite:
             )
             frames = mic.frames()
             while self.running:
-                frame = next(frames)
+                try:
+                    frame = next(frames)
+                except StopIteration:
+                    logger.info("input exhausted — stopping")
+                    break
                 self.ring.extend(frame)
                 detection = self.wake.process(frame)
                 if detection is None:
@@ -157,7 +174,24 @@ class Satellite:
             self.client.close()
         return 0
 
-    def _handle_detection(self, mic: Microphone, frames) -> None:
+    def _open_microphone(self):
+        """Open the real microphone, or replay a file when one was given."""
+        settings = self.settings
+        if self.input_wav is not None:
+            return FileMicrophone(
+                self.input_wav,
+                sample_rate=settings.audio.sample_rate,
+                frame_samples=settings.frame_samples,
+                gain=settings.audio.input_gain,
+            )
+        return Microphone(
+            sample_rate=settings.audio.sample_rate,
+            frame_samples=settings.frame_samples,
+            device=find_device(settings.audio.input_device, "input"),
+            gain=settings.audio.input_gain,
+        )
+
+    def _handle_detection(self, mic, frames) -> None:
         """Everything that happens between the wake word and the reply."""
         wake_samples = self.ring.snapshot()
         started = time.monotonic()
@@ -215,7 +249,7 @@ class Satellite:
         logger.info("round trip {:.2f}s", time.monotonic() - started)
         self._recover(mic)
 
-    def _recover(self, mic: Microphone) -> None:
+    def _recover(self, mic) -> None:
         """Return to a clean listening state after handling a detection."""
         self.wake.reset()
         self.ring.clear()
@@ -249,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(settings.log_level)
     logger.info("renfild-satellite {}", __version__)
 
-    satellite = Satellite(settings)
+    satellite = Satellite(settings, input_wav=args.input_wav)
     signal.signal(signal.SIGTERM, satellite.stop)
     signal.signal(signal.SIGINT, satellite.stop)
 
