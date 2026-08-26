@@ -8,17 +8,17 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
+/build/
 develop-eggs/
-dist/
+/dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
-var/
+/var/
 wheels/
 share/python-wheels/
 *.egg-info/
@@ -216,3 +216,79 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# Renfild project-specific
+# ---------------------------------------------------------------------------
+
+# Claude / AI assistant context — local only, never track
+CLAUDE.md
+.claude/
+.cursor/
+.aider*
+
+# Design / implementation / planning docs — local only
+/docs/
+*.design.md
+*.implementation.md
+
+# Local security scan output
+scans/
+
+# Build output
+/dist/
+/bin/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.dylib
+*.test
+*.out
+coverage.*
+profile.cov
+go.work
+go.work.sum
+vendor/
+
+# Frontend
+server/web/node_modules/
+server/web/.vite/
+*.tsbuildinfo
+npm-debug.log*
+
+# Embedded web UI build output (keep the placeholder so go:embed compiles)
+server/internal/webui/dist/*
+!server/internal/webui/dist/.gitkeep
+
+# Local dev config / data
+.env
+.env.*
+!.env.example
+/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+config.yaml
+!config.example.yaml
+
+# Models / binaries fetched at install time
+satellite/models/*
+!satellite/models/.gitkeep
+embedder/models/
+piper/
+
+# Recorded audio dumps (milestone 2 / debugging)
+*.wav
+!satellite/satellite/assets/*.wav
+!server/internal/**/testdata/*.wav
+!satellite/tests/testdata/*.wav
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.tools/
