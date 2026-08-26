@@ -1,0 +1,29 @@
+# Renfild satellite — runtime dependencies (Python 3.11+, arm64).
+#
+# openWakeWord is NOT listed here: its metadata hard-requires `tflite-runtime`
+# on Linux, which has no wheel beyond CPython 3.11. It is installed separately
+# with `--no-deps` from requirements-openwakeword.txt (install.sh does this for
+# you); every dependency it actually needs at runtime is pinned below.
+
+numpy==2.5.2
+scipy==1.16.3
+scikit-learn==1.9.0
+tqdm==4.68.0
+requests==2.34.2
+
+# Wake word + VAD inference. Both models run on onnxruntime; ai-edge-litert is
+# the TFLite interpreter for CPython >= 3.12, where tflite-runtime is not
+# available — it is what makes a .tflite wake word model usable on this Pi.
+onnxruntime==1.29.0
+ai-edge-litert==2.2.0
+
+# Audio I/O. sounddevice needs the system PortAudio library:
+#   sudo apt install libportaudio2
+sounddevice==0.5.6
+soxr==1.1.0
+
+httpx==0.28.1
+loguru==0.7.3
+pydantic==2.13.4
+pydantic-settings==2.15.0
+pyyaml==6.0.3
