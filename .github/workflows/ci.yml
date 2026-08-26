@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Vet
+        run: cd server && go vet ./...
+      - name: Check formatting
+        run: cd server && test -z "$(gofmt -l .)"
+      - name: Test
+        run: cd server && go test -cover ./...
+
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/web/package-lock.json
+      - run: cd server/web && npm ci
+      - run: cd server/web && npm run build
+
+  python:
+    name: ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [satellite, embedder]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          cd ${{ matrix.component }}
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          if [ -f requirements-openwakeword.txt ]; then
+            pip install --no-deps -r requirements-openwakeword.txt
+          fi
+      - name: Lint
+        run: cd ${{ matrix.component }} && ruff check .
+      - name: Test
+        # The embedder tests run against a stub model, so CI never downloads
+        # the real ECAPA weights.
+        env:
+          RENFILD_EMB_STUB: "1"
+        run: cd ${{ matrix.component }} && pytest
