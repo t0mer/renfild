@@ -1,0 +1,25 @@
+# Renfild embedder — runtime dependencies (Python 3.11+, CPU-only, arm64-friendly).
+#
+# SpeechBrain pulls in PyTorch: on arm64 this installs the CPU wheel (~1.5 GB on
+# disk). Nothing here reaches the network after the ECAPA weights are cached in
+# the model directory.
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+pydantic-settings==2.15.0
+anyio==4.14.2
+loguru==0.7.3
+
+numpy==2.5.2
+soundfile==0.14.0
+soxr==1.1.0
+
+speechbrain==1.1.0
+
+# CPU-only PyTorch. The default PyPI wheels for linux/aarch64 drag in several
+# GB of NVIDIA CUDA packages that are useless on a Raspberry Pi — the +cpu
+# builds from PyTorch's own index are the ones we want.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+torchaudio==2.11.0+cpu
