@@ -8,6 +8,7 @@ is the one thing that must never stop.
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -289,7 +290,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return satellite.run()
-    except (AudioError, FileNotFoundError) as exc:
+    except FileNotFoundError as exc:
+        # A missing model or config file will still be missing in five seconds.
+        logger.error("{}", exc)
+        return os.EX_CONFIG
+    except AudioError as exc:
+        # A microphone can be plugged back in, so this one is worth retrying.
         logger.error("{}", exc)
         return 1
     except KeyboardInterrupt:

@@ -16,6 +16,11 @@ Environment=RENFILD_SAT_CONFIG=/opt/renfild/etc/satellite.yaml
 ExecStart=/opt/renfild/satellite/.venv/bin/python -m satellite
 Restart=always
 RestartSec=5
+# Exit 78 (EX_CONFIG) means something a restart cannot fix — no wake word
+# model, unreadable config. Stop cleanly and let `systemctl status` say so,
+# rather than looping every five seconds forever. Missing audio hardware is
+# NOT in that class: a USB microphone can be plugged back in.
+RestartPreventExitStatus=78
 
 # Hardening. The daemon needs the sound devices and nothing else.
 NoNewPrivileges=yes

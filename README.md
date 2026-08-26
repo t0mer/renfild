@@ -555,6 +555,18 @@ The server logs "text to speech is unavailable" at startup and keeps running. Re
 `sudo ./install.sh --skip-satellite --skip-embedder --skip-server` to fetch Piper, or
 install it by hand into `/opt/renfild/piper`.
 
+**`systemctl status renfild-satellite` says "failed" or "inactive" after installing**
+
+Expected on a fresh install: the satellite needs a wake word model and there isn't one yet.
+It exits 78 (`EX_CONFIG`) and stops rather than restarting every five seconds forever — the
+journal line says exactly which file it wanted. Drop the model in, then:
+
+```bash
+sudo systemctl start renfild-satellite
+```
+
+The installer enables the unit but deliberately does not start it until a model is present.
+
 **The embedder takes forever to start**
 
 The first start downloads ~80 MB of model weights. `journalctl -u renfild-embedder -f`
