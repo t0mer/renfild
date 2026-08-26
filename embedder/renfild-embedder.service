@@ -12,6 +12,12 @@ WorkingDirectory=/opt/renfild/embedder
 EnvironmentFile=-/opt/renfild/etc/embedder.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HF_HUB_DISABLE_TELEMETRY=1
+# The service user's home is /opt/renfild, which it cannot write to, and the
+# model download wants a cache under $HOME. Keep every cache inside the
+# component's own directory, which the installer owns.
+Environment=HOME=/opt/renfild/embedder
+Environment=HF_HOME=/opt/renfild/embedder/models/huggingface
+Environment=XDG_CACHE_HOME=/opt/renfild/embedder/models/cache
 # Leave one core for the server and the satellite.
 Environment=OMP_NUM_THREADS=3
 ExecStart=/opt/renfild/embedder/.venv/bin/python -m embedder

@@ -206,7 +206,10 @@ sync_python_component() { # name source_dir
 install_embedder() {
   say "installing the embedder (SpeechBrain ECAPA — pulls in PyTorch, be patient)"
   sync_python_component embedder "$SOURCE_DIR/embedder"
-  install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$PREFIX/embedder/models"
+  install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+    "$PREFIX/embedder/models" \
+    "$PREFIX/embedder/models/huggingface" \
+    "$PREFIX/embedder/models/cache"
 
   if [ ! -f "$PREFIX/etc/embedder.env" ]; then
     install -m 0640 "$SOURCE_DIR/embedder/.env.example" "$PREFIX/etc/embedder.env"
@@ -302,14 +305,28 @@ if [ "$INSTALL_EMBEDDER" -eq 1 ];  then UNITS+=(renfild-embedder);  fi
 if [ "$INSTALL_SERVER" -eq 1 ];    then UNITS+=(renfild-server);    fi
 if [ "$INSTALL_SATELLITE" -eq 1 ]; then UNITS+=(renfild-satellite); fi
 
+# A fresh install has no wake word model yet, and the satellite cannot run
+# without one. Enable it so it comes up after a reboot once the model is in
+# place, but do not start it now just to have it fail.
+wake_model_present() {
+  find "$PREFIX/satellite/models" -maxdepth 1 \( -name '*.tflite' -o -name '*.onnx' \) \
+    ! -name 'silero_vad.onnx' -print -quit 2>/dev/null | grep -q .
+}
+
 for unit in "${UNITS[@]}"; do
   systemctl enable "$unit" >/dev/null 2>&1 || warn "could not enable $unit"
-  if [ "$START_SERVICES" -eq 1 ]; then
-    systemctl restart "$unit" || warn "$unit failed to start — check: journalctl -u $unit -n 50"
-    info "$unit enabled and started"
-  else
+
+  if [ "$START_SERVICES" -eq 0 ]; then
     info "$unit enabled (not started)"
+    continue
   fi
+  if [ "$unit" = "renfild-satellite" ] && ! wake_model_present; then
+    info "$unit enabled but not started — it needs a wake word model first"
+    continue
+  fi
+
+  systemctl restart "$unit" || warn "$unit failed to start — check: journalctl -u $unit -n 50"
+  info "$unit enabled and started"
 done
 
 cat <<DONE
@@ -321,7 +338,8 @@ $(say "Renfild is installed")
 
 Next steps:
     1. Drop your wake word model in $PREFIX/satellite/models/ and point
-       $PREFIX/etc/satellite.yaml at it (wake.model_path).
+       $PREFIX/etc/satellite.yaml at it (wake.model_path), then:
+           sudo systemctl start renfild-satellite
     2. Set the audio devices in $PREFIX/etc/satellite.yaml — 'arecord -L' lists them.
     3. Check the Whisper and Ollama URLs in $PREFIX/etc/server.yaml.
     4. Open the web UI and enroll yourself under Speakers.
