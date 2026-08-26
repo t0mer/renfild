@@ -28,7 +28,8 @@ audio:
 wake:
   # Train your own model with the openWakeWord notebook and drop the file here.
   # Both .onnx and .tflite work; the framework is picked from the extension.
-  model_path: /opt/renfild/satellite/models/renfild.onnx
+  # The wake phrase for this household is "Hey Renfild".
+  model_path: /opt/renfild/satellite/models/hey_renfild.onnx
   threshold: 0.6
   debounce_s: 3.0
   inference_framework: auto

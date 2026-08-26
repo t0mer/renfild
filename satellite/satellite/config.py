@@ -52,7 +52,7 @@ class AudioConfig(BaseModel):
 class WakeConfig(BaseModel):
     """openWakeWord settings."""
 
-    model_path: Path = Path("models/renfild.onnx")
+    model_path: Path = Path("models/hey_renfild.onnx")
     threshold: float = 0.6
     debounce_s: float = 3.0
     # 'auto' picks tflite or onnx from the model file extension.

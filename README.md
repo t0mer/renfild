@@ -204,24 +204,65 @@ the config file are shown read-only.
 
 ## Training a wake word
 
-Renfild does not ship a wake word — you train your own, which is what makes it *yours*.
+Renfild does not ship a wake word — you train your own, which is what makes it *yours*. The
+phrase for this household is **"Hey Renfild"**, and the satellite expects the model at
+`/opt/renfild/satellite/models/hey_renfild.onnx`.
 
 1. Open the [openWakeWord training notebook](https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb)
-   in Google Colab (from the [openWakeWord repository](https://github.com/dscripka/openWakeWord)).
-2. Pick a phrase of **three or four syllables** that does not occur in normal conversation.
-   Two-syllable words produce constant false triggers.
-3. Run the notebook. It synthesises thousands of samples of your phrase and trains a small
-   model, then hands you `.tflite` and `.onnx` files.
-4. Copy either file to `/opt/renfild/satellite/models/` and set `wake.model_path`. The
-   inference backend is chosen from the file extension — both work.
-5. Restart and watch: `journalctl -u renfild-satellite -f`. Adjust `wake.threshold`
-   (default `0.6`) until it fires reliably for you but not for the television.
+   in Google Colab (linked from the [openWakeWord repository](https://github.com/dscripka/openWakeWord)).
+   Training needs a GPU — it is not something a Pi can do.
+2. Set the target phrase to `hey renfild`. **Check the generated samples before you train**:
+   the sample generator pronounces through espeak, and an invented name can come out wrong.
+   If it does, add spelling variants (`hey ren field`, `hey renfeld`) so the model learns the
+   way you actually say it rather than the way espeak reads it.
+3. Run the notebook. It synthesises thousands of positive samples, trains against a large
+   negative set, and hands you `.tflite` and `.onnx` files.
+4. Copy either one to `/opt/renfild/satellite/models/hey_renfild.onnx` (or `.tflite` — the
+   inference backend is chosen from the extension; both work).
+5. Check it before trusting it, with the tool below.
+6. `sudo systemctl restart renfild-satellite`, then watch `journalctl -u renfild-satellite -f`.
 
 > On CPython 3.12 and newer there is no `tflite-runtime` wheel; the satellite transparently
 > uses Google's `ai-edge-litert` interpreter instead, so `.tflite` models still work. Both
 > backends were verified on this Pi against openWakeWord's pretrained `hey_jarvis` model: the
 > wake phrase peaked at **0.999** on each, while an unrelated sentence and silence both scored
 > **0.000**.
+
+### Choosing the threshold
+
+`hack/wake-check.py` speaks the phrase in every voice you point it at — at three speaking
+rates, alone and running into a command — then scores a set of negatives: ordinary household
+sentences, and deliberate near-misses derived from your phrase. It sweeps the threshold and
+tells you where the gap is.
+
+```bash
+satellite/.venv/bin/python hack/wake-check.py \
+    --model /opt/renfild/satellite/models/hey_renfild.onnx \
+    --phrase "Hey Renfild" \
+    --voices /opt/renfild/piper/voices/*.onnx
+```
+
+Run against the pretrained `hey_jarvis` model, it produces:
+
+```
+quietest wake word:        0.996
+loudest everyday sentence: 0.000
+loudest near-miss:         0.993
+
+ threshold    detected   everyday  near-miss
+       0.5       12/12          0          4
+       0.9       12/12          0          3
+
+suggested wake.threshold: 0.5
+```
+
+Two things to read there. Ordinary speech never comes close, which is what you want. But the
+bare name "Jarvis." scores 0.99 — no threshold tells it apart from the full phrase. That is a
+property of the model, not a bug, and whether it matters is your call: a wake word that also
+answers to the name alone is often *preferable*. The tool reports it rather than deciding.
+
+The suggested value is a starting point measured on synthetic speech, which is cleaner than a
+room with a television in it. Confirm it against your own logs.
 
 ### Testing without a microphone
 
