@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+/* Dark mode is toggled by a class on <html>, set before first paint. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-surface: #ffffff;
+  --color-surface-muted: #f6f7f9;
+  --color-ink: #12161c;
+  --color-ink-muted: #5c6672;
+  --color-line: #e3e6ea;
+  --color-accent: #6d4aff;
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+html.dark {
+  --color-surface: #14171d;
+  --color-surface-muted: #1b1f27;
+  --color-ink: #eef1f5;
+  --color-ink-muted: #98a2b0;
+  --color-line: #262b34;
+  --color-accent: #9b86ff;
+}
+
+body {
+  margin: 0;
+  background: var(--color-surface-muted);
+  color: var(--color-ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hebrew replies and transcripts must render right-to-left. */
+[dir="auto"] {
+  unicode-bidi: plaintext;
+}
