@@ -13,8 +13,11 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-# Silero v5 expects exactly 512 samples per inference step at 16 kHz.
+# Silero v5 expects exactly 512 samples per inference step at 16 kHz, prefixed
+# with 64 samples of context carried over from the previous chunk. Feeding it a
+# bare 512-sample chunk makes it score even clear speech near zero.
 CHUNK_SAMPLES = 512
+CONTEXT_SAMPLES = 64
 
 
 class SpeechDetector:
@@ -58,6 +61,7 @@ class SileroVad(SpeechDetector):
         self._state = None
         self._legacy = False  # v4 models take separate h/c tensors
         self._carry = np.zeros(0, dtype=np.float32)
+        self._context = np.zeros(CONTEXT_SAMPLES, dtype=np.float32)
 
     def load(self) -> None:
         import onnxruntime
@@ -77,6 +81,7 @@ class SileroVad(SpeechDetector):
 
     def reset(self) -> None:
         self._carry = np.zeros(0, dtype=np.float32)
+        self._context = np.zeros(CONTEXT_SAMPLES, dtype=np.float32)
         if self._legacy:
             self._state = (
                 np.zeros((2, 1, 64), dtype=np.float32),
@@ -105,10 +110,14 @@ class SileroVad(SpeechDetector):
             h, c = self._state
             out, h, c = self._session.run(None, {"input": chunk, "h": h, "c": c, "sr": sr})
             self._state = (h, c)
-        else:
-            out, self._state = self._session.run(
-                None, {"input": chunk, "state": self._state, "sr": sr}
-            )
+            return float(np.asarray(out).reshape(-1)[0])
+
+        # v5 wants the previous chunk's tail in front of this one.
+        window = np.concatenate((self._context, chunk.reshape(-1))).reshape(1, -1)
+        out, self._state = self._session.run(
+            None, {"input": window, "state": self._state, "sr": sr}
+        )
+        self._context = chunk.reshape(-1)[-CONTEXT_SAMPLES:].copy()
         return float(np.asarray(out).reshape(-1)[0])
 
 
