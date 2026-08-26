@@ -15,8 +15,10 @@ audio_retention: "none"
 audio_dir: "/var/lib/renfild/audio"
 
 whisper:
-  # Point this at your existing Whisper deployment.
-  url: "http://gandalf:9000"
+  # Point this at your own Whisper deployment — there is no default that works.
+  # Anything OpenAI-compatible will do (speaches, faster-whisper-server, LocalAI),
+  # running on this Pi or on a stronger host.
+  url: "http://127.0.0.1:9000"
   # 'openai' -> POST {url}/v1/audio/transcriptions  (OpenAI-compatible)
   # 'asr'    -> POST {url}/asr?task=transcribe      (whisper-asr-webservice)
   api: "openai"
@@ -31,7 +33,8 @@ embedder:
   timeout: "15s"
 
 ollama:
-  url: "http://gandalf:11434"
+  # Only needed if you enable the LLM fallback or use an 'llm' intent handler.
+  url: "http://127.0.0.1:11434"
   model: "qwen2.5:7b"
   # system_prompt_file: "/opt/renfild/etc/system-prompt.txt"
   timeout: "30s"

@@ -389,7 +389,7 @@ Precedence everywhere: **flags > environment > config file > defaults**.
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 | `audio_retention` | `none` | `none`, `24h`, `7d` — raw audio retention for debugging |
 | `audio_dir` | `/var/lib/renfild/audio` | Where retained audio is written |
-| `whisper.url` | `http://127.0.0.1:9000` | Whisper endpoint |
+| `whisper.url` | `http://127.0.0.1:9000` | Whisper endpoint. **There is no working default — point this at your own.** |
 | `whisper.api` | `openai` | `openai` (`/v1/audio/transcriptions`) or `asr` (whisper-asr-webservice) |
 | `whisper.model` | `whisper-1` | Model name, for the OpenAI shape |
 | `whisper.language` | `auto` | `he`, `en`, … or `auto` |
