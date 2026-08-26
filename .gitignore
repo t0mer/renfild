@@ -238,6 +238,7 @@ scans/
 # Build output
 /dist/
 /bin/
+server/renfild
 
 # Go
 *.exe
