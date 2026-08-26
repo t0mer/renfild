@@ -218,7 +218,23 @@ Renfild does not ship a wake word — you train your own, which is what makes it
    (default `0.6`) until it fires reliably for you but not for the television.
 
 > On CPython 3.12 and newer there is no `tflite-runtime` wheel; the satellite transparently
-> uses Google's `ai-edge-litert` interpreter instead, so `.tflite` models still work.
+> uses Google's `ai-edge-litert` interpreter instead, so `.tflite` models still work. Both
+> backends were verified on this Pi against openWakeWord's pretrained `hey_jarvis` model: the
+> wake phrase peaked at **0.999** on each, while an unrelated sentence and silence both scored
+> **0.000**.
+
+### Testing without a microphone
+
+The satellite can replay a WAV instead of opening the microphone, which is how the wake word
+and capture loop get exercised on a headless box:
+
+```bash
+python -m satellite --config config.yaml --input-wav session.wav --offline --dump-dir /tmp/renfild
+```
+
+It runs the real wake model, the real VAD and the real capture loop, writes the same
+`wake.wav`/`command.wav` pair a live detection would, and suppresses playback so no sound
+hardware is needed. Drop `--offline` to send the result to a running server.
 
 ---
 
@@ -251,6 +267,30 @@ household and your microphone — this is normal and expected.
 
 Every utterance logs the **best and runner-up scores** — the History page is where you tune.
 The gap between the two matters more than the absolute numbers.
+
+#### What the scores look like in practice
+
+`hack/speaker-eval.py` enrolls a set of voices, then identifies held-out clips of each and
+prints the score matrix. Run against four enrolled speakers plus one who is not enrolled:
+
+| | own voice | best impostor | unenrolled stranger's best |
+|---|---|---|---|
+| Score range | 0.75 – 0.88 | −0.06 – 0.32 | 0.32 |
+
+Twenty of twenty clips were classified correctly at the default 0.45 threshold, with the
+stranger correctly reported as `unknown`. Wake-length clips (1.0–1.5 s) scored as reliably as
+full commands, which matters because identification runs on the 2 s wake snapshot.
+
+> **Read that as a ceiling, not a promise.** That corpus is synthesised — each "speaker" is a
+> different Piper voice, which makes them cleaner and more distinct than four members of one
+> household talking across a room. Real voices score lower and sit closer together. Use the
+> tool to see the *shape* of the numbers on your own hardware, and tune from your own History
+> page.
+
+```bash
+satellite/.venv/bin/python hack/speaker-eval.py \
+    --voices /opt/renfild/piper/voices/*.onnx
+```
 
 ---
 
@@ -439,13 +479,34 @@ The History page breaks every utterance down by stage. Typically:
 
 | Stage | Measured on a Pi 4 (4 GB) | If it is slow |
 |---|---|---|
-| `spk` (speaker ID) | ~1.0–1.5 s for the 2 s wake snapshot | ECAPA on a Pi 4 CPU is the most expensive stage. It runs concurrently with `stt`, so it is often not what you are waiting for — but if it is, move the embedder to a stronger host: `embedder.url` is just configuration. |
+| `spk` (speaker ID) | ~750 ms for a 1.8 s wake snapshot, ~1.3 s for 2.5 s of audio | ECAPA on a Pi 4 CPU. It runs concurrently with `stt`, so it is often not what you are waiting for — but if it is, move the embedder to a stronger host: `embedder.url` is just configuration. |
 | `stt` (Whisper) | 300–1200 ms, depending on the model and where it runs | Use a smaller model, or move it off the Pi |
 | `intent` | < 10 ms for rules, seconds for `llm` | An LLM reply is never going to be instant; keep `max_words` low |
-| `tts` (Piper) | 200–600 ms | A `low` quality voice is noticeably faster than `medium` |
+| `tts` (Piper) | **~2.0 s for a short reply** | See below — this is usually the biggest number on the page |
+
+**Piper is the bottleneck, and most of it is startup.** The server runs one Piper process per
+reply. On a Pi 4 that costs roughly **0.95 s of fixed process and model loading**, plus about
+0.49 s per second of speech produced:
+
+| Voice | Reply | Audio produced | Wall time |
+|---|---|---|---|
+| `en_US-lessac-medium` | short | 2.00 s | 1.94 s |
+| `en_US-lessac-medium` | long | 5.46 s | 3.65 s |
+| `en_US-kathleen-low` | short | 2.09 s | 1.83 s |
+| `en_US-kathleen-low` | long | 6.09 s | 3.23 s |
+
+A measured end-to-end round trip on this hardware — wake word to reply audio in hand, with a
+mocked Whisper — was **3.4 s**: 757 ms speaker ID, 3 ms transcription, 0 ms routing, 2.6 s
+synthesis. A `low` quality voice saves a little; keeping replies short saves more. The fixed
+second per reply can only be removed by keeping a Piper process alive between utterances,
+which v1 deliberately does not do.
 
 The embedder also spends 15–20 seconds loading ECAPA at startup. That happens once, at boot,
 not per utterance.
+
+Wake word and VAD are cheap enough to ignore: on the same Pi, openWakeWord costs 15.9 ms per
+80 ms frame on ONNX and 11.8 ms on TFLite, and Silero VAD costs 3.5 ms — together well under
+a quarter of one core in real time.
 
 **`piper: no such file or directory`**
 
