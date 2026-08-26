@@ -1,0 +1,32 @@
+[Unit]
+Description=Renfild speaker embedder (ECAPA-TDNN)
+Documentation=https://github.com/t0mer/renfild
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=renfild
+Group=renfild
+WorkingDirectory=/opt/renfild/embedder
+EnvironmentFile=-/opt/renfild/etc/embedder.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+# Leave one core for the server and the satellite.
+Environment=OMP_NUM_THREADS=3
+ExecStart=/opt/renfild/embedder/.venv/bin/python -m embedder
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+# Hardening: the sidecar only needs to read its own venv and write its model cache.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,55 @@
+# Renfild satellite configuration.
+# Copy to /opt/renfild/etc/satellite.yaml (install.sh does this for you).
+# Every key can be overridden from the environment:
+#   RENFILD_SAT_SATELLITE_ID=kitchen
+#   RENFILD_SAT_WAKE__THRESHOLD=0.7          (nested keys use a double underscore)
+# Environment wins over this file, which wins over the built-in defaults.
+
+satellite_id: living-room
+log_level: INFO
+
+server:
+  url: http://127.0.0.1:8080
+  timeout_s: 15
+  retries: 1
+
+audio:
+  # Devices are matched by name substring — run `python -m satellite --list-devices`
+  # or `arecord -L` to see what is attached. Indexes are deliberately not used:
+  # they move around between reboots.
+  input_device: USB
+  output_device: USB
+  sample_rate: 16000
+  frame_ms: 80          # 1280 samples — openWakeWord's chunk size
+  ring_seconds: 2.0     # snapshot handed to speaker identification
+  input_gain: 1.0
+  output_volume: 1.0
+
+wake:
+  # Train your own model with the openWakeWord notebook and drop the file here.
+  # Both .onnx and .tflite work; the framework is picked from the extension.
+  model_path: /opt/renfild/satellite/models/renfild.onnx
+  threshold: 0.6
+  debounce_s: 3.0
+  inference_framework: auto
+  # resources_dir: /opt/renfild/satellite/models   # melspectrogram + embedding models
+
+vad:
+  model_path: /opt/renfild/satellite/models/silero_vad.onnx
+  threshold: 0.5
+  trailing_silence_ms: 700
+  max_command_s: 10.0
+  start_timeout_s: 4.0
+  fallback_rms: 0.012
+
+chimes:
+  enabled: true
+  volume: 0.35
+  # listening: /opt/renfild/satellite/sounds/listening.wav
+  # ack: /opt/renfild/satellite/sounds/ack.wav
+  # error: /opt/renfild/satellite/sounds/error.wav
+
+# Debugging aids. dump_dir writes wake.wav/command.wav for every detection;
+# offline skips the server entirely (useful for tuning the wake word by ear).
+# dump_dir: /var/lib/renfild/dumps
+offline: false

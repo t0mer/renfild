@@ -1,0 +1,62 @@
+# Renfild server configuration.
+# Copy to /opt/renfild/etc/server.yaml (install.sh does this for you).
+#
+# Precedence: command-line flags > environment > this file > built-in defaults.
+# Environment variables are the key path in upper case, prefixed with RENFILD_
+# and joined with underscores:  whisper.url -> RENFILD_WHISPER_URL
+
+listen: ":8080"
+db: "/var/lib/renfild/renfild.db"
+log_level: "info"
+
+# Raw audio is NOT stored by default. 'none' | '24h' | '7d'.
+# Transcripts and voice embeddings are always stored — see the README.
+audio_retention: "none"
+audio_dir: "/var/lib/renfild/audio"
+
+whisper:
+  # Point this at your existing Whisper deployment.
+  url: "http://gandalf:9000"
+  # 'openai' -> POST {url}/v1/audio/transcriptions  (OpenAI-compatible)
+  # 'asr'    -> POST {url}/asr?task=transcribe      (whisper-asr-webservice)
+  api: "openai"
+  model: "whisper-1"
+  # 'he', 'en', or 'auto' to let the model decide.
+  language: "auto"
+  # api_key: ""        # only if your endpoint requires one
+  timeout: "20s"
+
+embedder:
+  url: "http://127.0.0.1:8100"
+  timeout: "15s"
+
+ollama:
+  url: "http://gandalf:11434"
+  model: "qwen2.5:7b"
+  # system_prompt_file: "/opt/renfild/etc/system-prompt.txt"
+  timeout: "30s"
+  # Hard cap on spoken answers. Nobody wants a lecture from a speaker.
+  max_words: 60
+  # Send transcripts that match no rule to the model.
+  fallback: true
+
+piper:
+  binary: "/opt/renfild/piper/piper"
+  voice: "/opt/renfild/piper/voices/en_US-lessac-medium.onnx"
+  speaker_id: 0
+  timeout: "10s"
+  # extra_args: ["--length_scale", "1.0"]
+
+speaker:
+  # Cosine similarity floor. Expect to tune this per household and microphone;
+  # the History page shows the scores you are actually getting.
+  default_threshold: 0.45
+  # 'restricted' — an unrecognised voice may only trigger intents with min_role: any
+  # 'deny'       — an unrecognised voice gets no response at all
+  # 'allow'      — an unrecognised voice is treated as a member
+  unknown_policy: "restricted"
+  # When the wake-word match lands this close to the threshold, the command
+  # audio is embedded too and the two are averaged before deciding.
+  low_confidence_margin: 0.05
+  enrollment_samples: 5
+  min_sample_similarity: 0.30

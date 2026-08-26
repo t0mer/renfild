@@ -1,0 +1,30 @@
+[Unit]
+Description=Renfild voice satellite (wake word + capture)
+Documentation=https://github.com/t0mer/renfild
+After=sound.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=renfild
+Group=renfild
+SupplementaryGroups=audio
+WorkingDirectory=/opt/renfild/satellite
+EnvironmentFile=-/opt/renfild/etc/satellite.env
+Environment=PYTHONUNBUFFERED=1
+Environment=RENFILD_SAT_CONFIG=/opt/renfild/etc/satellite.yaml
+ExecStart=/opt/renfild/satellite/.venv/bin/python -m satellite
+Restart=always
+RestartSec=5
+
+# Hardening. The daemon needs the sound devices and nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=multi-user.target

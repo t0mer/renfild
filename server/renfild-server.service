@@ -1,0 +1,30 @@
+[Unit]
+Description=Renfild voice assistant server
+Documentation=https://github.com/t0mer/renfild
+After=network-online.target
+Wants=network-online.target
+# The embedder is optional at boot: the server logs and carries on if it is down.
+After=renfild-embedder.service
+
+[Service]
+Type=simple
+User=renfild
+Group=renfild
+WorkingDirectory=/opt/renfild/server
+EnvironmentFile=-/opt/renfild/etc/server.env
+ExecStart=/opt/renfild/server/renfild serve --config /opt/renfild/etc/server.yaml
+Restart=always
+RestartSec=5
+
+# Hardening: the server needs its data directory, the Piper binary and the network.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/renfild
+
+[Install]
+WantedBy=multi-user.target
