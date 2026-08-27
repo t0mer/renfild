@@ -12,13 +12,32 @@ import (
 )
 
 // Rules implements intent.RuleSource: the enabled rule table, cheapest first.
+// This is the router's path, so credentials come back decrypted — they are
+// about to be sent.
 func (s *Store) Rules(ctx context.Context) ([]intent.Rule, error) {
-	return s.listIntents(ctx, true)
+	rules, err := s.listIntents(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rules {
+		if err := intent.OpenHandlerConfig(&rules[i], s.secrets); err != nil {
+			return nil, fmt.Errorf("intent %q: %w", rules[i].Name, err)
+		}
+	}
+	return rules, nil
 }
 
-// ListIntents returns every rule, enabled or not, for the web UI.
+// ListIntents returns every rule, enabled or not, for the web UI — with the
+// credentials masked, so they are never served over HTTP.
 func (s *Store) ListIntents(ctx context.Context) ([]intent.Rule, error) {
-	return s.listIntents(ctx, false)
+	rules, err := s.listIntents(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rules {
+		intent.MaskHandlerConfig(&rules[i])
+	}
+	return rules, nil
 }
 
 func (s *Store) listIntents(ctx context.Context, onlyEnabled bool) ([]intent.Rule, error) {
@@ -49,6 +68,26 @@ func (s *Store) listIntents(ctx context.Context, onlyEnabled bool) ([]intent.Rul
 
 // GetIntent returns one rule by id.
 func (s *Store) GetIntent(ctx context.Context, id int64) (intent.Rule, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, enabled, match_type, patterns, min_role, handler,
+		       handler_config, priority, created_at, updated_at
+		FROM intents WHERE id = ?`, id)
+	rule, err := scanIntent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return intent.Rule{}, ErrNotFound
+	}
+	if err != nil {
+		return rule, err
+	}
+	// Same as ListIntents: this is what the web UI reads.
+	intent.MaskHandlerConfig(&rule)
+	return rule, nil
+}
+
+// storedIntent returns a rule exactly as the database holds it, credentials
+// still sealed. Only the update path needs this, to keep a header the user did
+// not retype.
+func (s *Store) storedIntent(ctx context.Context, id int64) (intent.Rule, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, enabled, match_type, patterns, min_role, handler,
 		       handler_config, priority, created_at, updated_at
@@ -97,6 +136,9 @@ func (s *Store) CreateIntent(ctx context.Context, rule intent.Rule) (int64, erro
 	if err := rule.Validate(); err != nil {
 		return 0, err
 	}
+	if err := intent.SealHandlerConfig(&rule, s.secrets, nil); err != nil {
+		return 0, fmt.Errorf("intent %q: %w", rule.Name, err)
+	}
 	patterns, err := json.Marshal(rule.Patterns)
 	if err != nil {
 		return 0, fmt.Errorf("encoding patterns: %w", err)
@@ -118,6 +160,13 @@ func (s *Store) CreateIntent(ctx context.Context, rule intent.Rule) (int64, erro
 func (s *Store) UpdateIntent(ctx context.Context, id int64, rule intent.Rule) error {
 	if err := rule.Validate(); err != nil {
 		return err
+	}
+	stored, err := s.storedIntent(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := intent.SealHandlerConfig(&rule, s.secrets, stored.HandlerConfig); err != nil {
+		return fmt.Errorf("intent %q: %w", rule.Name, err)
 	}
 	patterns, err := json.Marshal(rule.Patterns)
 	if err != nil {

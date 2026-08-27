@@ -19,16 +19,22 @@ const EnvPrefix = "RENFILD"
 
 // Config is the whole server configuration.
 type Config struct {
-	Listen         string   `mapstructure:"listen" json:"listen"`
-	DB             string   `mapstructure:"db" json:"db"`
-	LogLevel       string   `mapstructure:"log_level" json:"log_level"`
-	AudioRetention string   `mapstructure:"audio_retention" json:"audio_retention"`
-	AudioDir       string   `mapstructure:"audio_dir" json:"audio_dir"`
-	Whisper        Whisper  `mapstructure:"whisper" json:"whisper"`
-	Embedder       Embedder `mapstructure:"embedder" json:"embedder"`
-	Ollama         Ollama   `mapstructure:"ollama" json:"ollama"`
-	Piper          Piper    `mapstructure:"piper" json:"piper"`
-	Speaker        Speaker  `mapstructure:"speaker" json:"speaker"`
+	Listen         string `mapstructure:"listen" json:"listen"`
+	DB             string `mapstructure:"db" json:"db"`
+	LogLevel       string `mapstructure:"log_level" json:"log_level"`
+	AudioRetention string `mapstructure:"audio_retention" json:"audio_retention"`
+	AudioDir       string `mapstructure:"audio_dir" json:"audio_dir"`
+	// SecretKeyFile holds the AES-256 key that seals webhook credentials at
+	// rest. It is generated on first start if it does not exist.
+	SecretKeyFile string `mapstructure:"secret_key_file" json:"secret_key_file"`
+	// SecretKey is the same key supplied directly as hex, for deployments that
+	// would rather not keep a file. It wins over SecretKeyFile.
+	SecretKey string   `mapstructure:"secret_key" json:"-"`
+	Whisper   Whisper  `mapstructure:"whisper" json:"whisper"`
+	Embedder  Embedder `mapstructure:"embedder" json:"embedder"`
+	Ollama    Ollama   `mapstructure:"ollama" json:"ollama"`
+	Piper     Piper    `mapstructure:"piper" json:"piper"`
+	Speaker   Speaker  `mapstructure:"speaker" json:"speaker"`
 }
 
 // Whisper describes the speech-to-text endpoint.
@@ -122,6 +128,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("log_level", "info")
 	v.SetDefault("audio_retention", "none")
 	v.SetDefault("audio_dir", "/var/lib/renfild/audio")
+	v.SetDefault("secret_key_file", "/var/lib/renfild/secret.key")
 
 	v.SetDefault("whisper.url", "http://127.0.0.1:9000")
 	v.SetDefault("whisper.api", WhisperAPIOpenAI)

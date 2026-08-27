@@ -22,6 +22,7 @@ import (
 	"github.com/t0mer/renfild/internal/intent"
 	"github.com/t0mer/renfild/internal/metrics"
 	"github.com/t0mer/renfild/internal/pipeline"
+	"github.com/t0mer/renfild/internal/secret"
 	"github.com/t0mer/renfild/internal/store"
 	"github.com/t0mer/renfild/internal/version"
 )
@@ -79,6 +80,12 @@ func runServe(cmd *cobra.Command) error {
 	}
 	defer db.Close()
 	log.Info("database ready", "path", cfg.DB)
+
+	secrets, err := openSecrets(cfg)
+	if err != nil {
+		return err
+	}
+	db.UseSecrets(secrets)
 
 	runtime := config.NewRuntime(cfg)
 	var persisted config.RuntimeSettings
@@ -247,6 +254,24 @@ func prunePass(ctx context.Context, db *store.Store, window time.Duration, log *
 		log.Info("pruned expired audio", "count", len(paths))
 	}
 	return len(paths)
+}
+
+// openSecrets resolves the key that seals webhook credentials, generating one
+// on first start. A key handed in through the environment wins, so a deployment
+// that keeps its secrets elsewhere never has to write this one to disk.
+func openSecrets(cfg *config.Config) (*secret.Box, error) {
+	if raw := strings.TrimSpace(cfg.SecretKey); raw != "" {
+		key, err := secret.ParseKey(raw)
+		if err != nil {
+			return nil, fmt.Errorf("secret_key: %w", err)
+		}
+		return secret.New(key)
+	}
+	key, err := secret.LoadOrCreateKey(cfg.SecretKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return secret.New(key)
 }
 
 func loadSystemPrompt(path string) (string, error) {

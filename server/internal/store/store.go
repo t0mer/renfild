@@ -15,6 +15,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/t0mer/renfild/internal/secret"
 )
 
 //go:embed migrations/*.sql
@@ -23,6 +25,15 @@ var migrationFS embed.FS
 // Store is a handle on the Renfild database.
 type Store struct {
 	db *sql.DB
+	// secrets encrypts the credentials in webhook rules. A nil box leaves them
+	// in plaintext, which is only ever the case in tests that do not touch a
+	// webhook.
+	secrets *secret.Box
+}
+
+// UseSecrets attaches the key used to seal webhook credentials at rest.
+func (s *Store) UseSecrets(box *secret.Box) {
+	s.secrets = box
 }
 
 // Open opens (creating it if needed) the database at path and applies every
