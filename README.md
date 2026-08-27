@@ -676,6 +676,11 @@ the first reply onwards — the voice is loaded at startup, not on first use. Th
 is slower to start (about six seconds) because it is loading an interpreter and onnxruntime
 as well as the voice, but once warm the two engines are within noise of each other.
 
+The cost is that the process stays resident: about **83 MB** for a `medium` voice, held for
+as long as the server runs. Set `piper.persistent: false` if you would rather have the
+memory back than the second. A process that dies — the OOM reaper, say — is replaced on the
+next reply rather than breaking it.
+
 The embedder also spends 15–20 seconds loading ECAPA at startup. That happens once, at boot,
 not per utterance.
 
