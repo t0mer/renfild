@@ -336,11 +336,20 @@ install_piper_cpp() {
 install_piper_python() {
   if [ ! -x "$PREFIX/piper/venv/bin/python" ]; then
     info "creating the piper virtualenv (this takes a while on a Pi)"
-    python3 -m venv "$PREFIX/piper/venv"
+    if ! python3 -m venv "$PREFIX/piper/venv"; then
+      warn "could not create the piper virtualenv"
+      return 1
+    fi
   fi
-  "$PREFIX/piper/venv/bin/pip" install --quiet --upgrade pip wheel
   info "installing piper-tts $PIPER_TTS_VERSION"
-  "$PREFIX/piper/venv/bin/pip" install --quiet "piper-tts==$PIPER_TTS_VERSION"
+  # A failed install must not take the whole run down with it — the rest of
+  # Renfild is still worth installing, and the server only warns about a
+  # missing voice.
+  if ! "$PREFIX/piper/venv/bin/pip" install --quiet --upgrade pip wheel \
+     || ! "$PREFIX/piper/venv/bin/pip" install --quiet "piper-tts==$PIPER_TTS_VERSION"; then
+    warn "could not install piper-tts — install it into $PREFIX/piper/venv yourself"
+    return 1
+  fi
   info "installed piper -> $PREFIX/piper/venv/bin/piper"
 }
 
@@ -350,7 +359,7 @@ install_piper() {
   say "installing Piper ($engine, voice $PIPER_VOICE, $ARCH)"
 
   if [ "$engine" = "python" ]; then
-    install_piper_python
+    install_piper_python || true
   else
     install_piper_cpp
   fi
@@ -384,11 +393,12 @@ configure_piper() { # engine
     return 0
   fi
 
-  sed -i \
-    -e "s|^  engine: .*|  engine: \"$engine\"|" \
-    -e "s|^  binary: .*|  binary: \"$binary\"|" \
-    -e "s|^  voice: .*|  voice: \"$PREFIX/piper/voices/$PIPER_VOICE.onnx\"|" \
-    "$config"
+  # Scoped to the piper block so a key that repeats elsewhere is left alone.
+  sed -i "/^piper:/,/^[^ #]/ {
+    s|^  engine: .*|  engine: \"$engine\"|
+    s|^  binary: .*|  binary: \"$binary\"|
+    s|^  voice: .*|  voice: \"$PREFIX/piper/voices/$PIPER_VOICE.onnx\"|
+  }" "$config"
   info "pointed $config at the $engine engine and $PIPER_VOICE"
 }
 
