@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,37 +18,64 @@ type TTS interface {
 	Synthesize(ctx context.Context, text string) ([]byte, error)
 }
 
-// Piper invokes the Piper binary once per reply: text on stdin, WAV on stdout.
-// Synthesis on arm64 is quick enough that keeping a daemon alive is not worth
-// the complexity.
-type Piper struct {
+// PiperOptions configures the Piper text-to-speech client.
+type PiperOptions struct {
 	Binary    string
 	Voice     string
 	SpeakerID int
 	Timeout   time.Duration
+	// ExtraArgs is passed verbatim to the binary, for voice-specific tuning
+	// such as --length_scale.
 	ExtraArgs []string
+	// Persistent keeps one piper process alive between replies instead of
+	// spawning it per utterance. Loading the voice costs about a second on a
+	// Pi 4 and a typical answer is only two seconds of audio, so paying that
+	// once at startup rather than on every reply nearly halves time-to-speech.
+	Persistent bool
+}
+
+// Piper drives the Piper binary. In one-shot mode it feeds text on stdin and
+// reads a WAV back from stdout. In persistent mode it keeps a process alive in
+// --json-input mode and exchanges one line per utterance; see piper_daemon.go.
+type Piper struct {
+	opts PiperOptions
+
+	mu   sync.Mutex
+	proc *piperProcess
+	seq  uint64
 }
 
 // NewPiper builds a Piper TTS client.
-func NewPiper(binary, voice string, speakerID int, timeout time.Duration, extraArgs []string) *Piper {
-	return &Piper{
-		Binary:    binary,
-		Voice:     voice,
-		SpeakerID: speakerID,
-		Timeout:   timeout,
-		ExtraArgs: extraArgs,
-	}
+func NewPiper(opts PiperOptions) *Piper {
+	return &Piper{opts: opts}
 }
 
 // Available reports whether the binary and the voice model are both present.
 func (p *Piper) Available() error {
-	if _, err := os.Stat(p.Binary); err != nil {
-		return fmt.Errorf("piper binary %s: %w", p.Binary, err)
+	if _, err := os.Stat(p.opts.Binary); err != nil {
+		return fmt.Errorf("piper binary %s: %w", p.opts.Binary, err)
 	}
-	if _, err := os.Stat(p.Voice); err != nil {
-		return fmt.Errorf("piper voice %s: %w", p.Voice, err)
+	if _, err := os.Stat(p.opts.Voice); err != nil {
+		return fmt.Errorf("piper voice %s: %w", p.opts.Voice, err)
 	}
 	return nil
+}
+
+// timeout is the per-utterance budget, defaulted when unset.
+func (p *Piper) timeout() time.Duration {
+	if p.opts.Timeout <= 0 {
+		return 10 * time.Second
+	}
+	return p.opts.Timeout
+}
+
+// voiceArgs are the arguments shared by both modes.
+func (p *Piper) voiceArgs() []string {
+	args := []string{"--model", p.opts.Voice}
+	if p.opts.SpeakerID > 0 {
+		args = append(args, "--speaker", strconv.Itoa(p.opts.SpeakerID))
+	}
+	return append(args, p.opts.ExtraArgs...)
 }
 
 // Synthesize speaks text and returns a WAV blob.
@@ -60,21 +88,22 @@ func (p *Piper) Synthesize(ctx context.Context, text string) ([]byte, error) {
 		return nil, err
 	}
 
-	timeout := p.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, p.timeout())
 	defer cancel()
 
-	// "--output_file -" makes Piper write a complete WAV to stdout.
-	args := []string{"--model", p.Voice, "--output_file", "-"}
-	if p.SpeakerID > 0 {
-		args = append(args, "--speaker", strconv.Itoa(p.SpeakerID))
+	if p.opts.Persistent {
+		return p.synthesizePersistent(ctx, text)
 	}
-	args = append(args, p.ExtraArgs...)
+	return p.synthesizeOneShot(ctx, text)
+}
 
-	cmd := exec.CommandContext(ctx, p.Binary, args...)
+// synthesizeOneShot spawns piper, hands it the text and collects the WAV it
+// writes to stdout.
+func (p *Piper) synthesizeOneShot(ctx context.Context, text string) ([]byte, error) {
+	// "--output_file -" makes Piper write a complete WAV to stdout.
+	args := append(p.voiceArgs(), "--output_file", "-")
+
+	cmd := exec.CommandContext(ctx, p.opts.Binary, args...)
 	cmd.Stdin = strings.NewReader(text + "\n")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -82,7 +111,7 @@ func (p *Piper) Synthesize(ctx context.Context, text string) ([]byte, error) {
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("piper timed out after %s", timeout)
+			return nil, fmt.Errorf("piper timed out after %s", p.timeout())
 		}
 		return nil, fmt.Errorf("running piper: %w (%s)", err, snippet(stderr.Bytes()))
 	}

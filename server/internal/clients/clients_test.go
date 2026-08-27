@@ -316,7 +316,7 @@ func fakePiper(t *testing.T, body string) (binary, voice string) {
 func TestPiperSynthesize(t *testing.T) {
 	binary, voice := fakePiper(t, "#!/bin/sh\ncat > /dev/null\nprintf 'RIFFWAVE'\n")
 
-	piper := NewPiper(binary, voice, 0, 5*time.Second, nil)
+	piper := NewPiper(PiperOptions{Binary: binary, Voice: voice, Timeout: 5 * time.Second})
 	audio, err := piper.Synthesize(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("Synthesize() error: %v", err)
@@ -329,7 +329,8 @@ func TestPiperSynthesize(t *testing.T) {
 func TestPiperPassesTheVoiceAndSpeakerArguments(t *testing.T) {
 	binary, voice := fakePiper(t, "#!/bin/sh\ncat > /dev/null\necho \"$@\"\n")
 
-	piper := NewPiper(binary, voice, 3, 5*time.Second, []string{"--length_scale", "1.1"})
+	piper := NewPiper(PiperOptions{Binary: binary, Voice: voice, SpeakerID: 3, Timeout: 5 * time.Second,
+		ExtraArgs: []string{"--length_scale", "1.1"}})
 	out, err := piper.Synthesize(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("Synthesize() error: %v", err)
@@ -345,13 +346,13 @@ func TestPiperPassesTheVoiceAndSpeakerArguments(t *testing.T) {
 func TestPiperErrors(t *testing.T) {
 	t.Run("empty text", func(t *testing.T) {
 		binary, voice := fakePiper(t, "#!/bin/sh\nprintf 'x'\n")
-		if _, err := NewPiper(binary, voice, 0, time.Second, nil).Synthesize(context.Background(), "  "); err == nil {
+		if _, err := NewPiper(PiperOptions{Binary: binary, Voice: voice, Timeout: time.Second}).Synthesize(context.Background(), "  "); err == nil {
 			t.Fatal("expected an error for empty text")
 		}
 	})
 
 	t.Run("missing binary", func(t *testing.T) {
-		piper := NewPiper("/nonexistent/piper", "/nonexistent/voice.onnx", 0, time.Second, nil)
+		piper := NewPiper(PiperOptions{Binary: "/nonexistent/piper", Voice: "/nonexistent/voice.onnx", Timeout: time.Second})
 		if err := piper.Available(); err == nil {
 			t.Fatal("expected Available() to report the missing binary")
 		}
@@ -362,7 +363,7 @@ func TestPiperErrors(t *testing.T) {
 
 	t.Run("binary fails", func(t *testing.T) {
 		binary, voice := fakePiper(t, "#!/bin/sh\ncat > /dev/null\necho 'voice not found' >&2\nexit 1\n")
-		_, err := NewPiper(binary, voice, 0, time.Second, nil).Synthesize(context.Background(), "hello")
+		_, err := NewPiper(PiperOptions{Binary: binary, Voice: voice, Timeout: time.Second}).Synthesize(context.Background(), "hello")
 		if err == nil || !strings.Contains(err.Error(), "voice not found") {
 			t.Fatalf("error = %v, want piper's stderr", err)
 		}
@@ -370,7 +371,7 @@ func TestPiperErrors(t *testing.T) {
 
 	t.Run("binary produces nothing", func(t *testing.T) {
 		binary, voice := fakePiper(t, "#!/bin/sh\ncat > /dev/null\n")
-		if _, err := NewPiper(binary, voice, 0, time.Second, nil).Synthesize(context.Background(), "hello"); err == nil {
+		if _, err := NewPiper(PiperOptions{Binary: binary, Voice: voice, Timeout: time.Second}).Synthesize(context.Background(), "hello"); err == nil {
 			t.Fatal("expected an error when no audio is produced")
 		}
 	})

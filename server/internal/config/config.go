@@ -70,6 +70,11 @@ type Piper struct {
 	// ExtraArgs is passed verbatim to the binary, for voice-specific tuning
 	// such as --length_scale.
 	ExtraArgs []string `mapstructure:"extra_args" json:"extra_args"`
+	// Persistent keeps one piper process alive between replies. Loading the
+	// voice takes about a second on a Pi 4, which is most of the wait for a
+	// short answer, so this is on by default. Turn it off to trade that second
+	// back for a process that only exists while it is speaking.
+	Persistent bool `mapstructure:"persistent" json:"persistent"`
 }
 
 // Speaker holds the speaker-recognition tuning knobs.
@@ -127,6 +132,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("piper.voice", "/opt/renfild/piper/voices/en_US-lessac-medium.onnx")
 	v.SetDefault("piper.speaker_id", 0)
 	v.SetDefault("piper.timeout", 10*time.Second)
+	v.SetDefault("piper.persistent", true)
 
 	v.SetDefault("speaker.default_threshold", 0.45)
 	v.SetDefault("speaker.unknown_policy", PolicyRestricted)
@@ -200,6 +206,7 @@ var flagKeys = map[string]string{
 	"ollama-model":      "ollama.model",
 	"piper-binary":      "piper.binary",
 	"piper-voice":       "piper.voice",
+	"piper-persistent":  "piper.persistent",
 	"speaker-threshold": "speaker.default_threshold",
 	"unknown-policy":    "speaker.unknown_policy",
 }

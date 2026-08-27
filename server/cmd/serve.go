@@ -55,6 +55,7 @@ func addServeFlags(flags *pflag.FlagSet) {
 	flags.String("ollama-model", "", "Ollama model name")
 	flags.String("piper-binary", "", "path to the piper binary")
 	flags.String("piper-voice", "", "path to the piper voice model")
+	flags.Bool("piper-persistent", true, "keep one piper process alive between replies")
 	flags.Float64("speaker-threshold", 0, "cosine similarity floor for speaker matching")
 	flags.String("unknown-policy", "", "restricted, deny or allow")
 }
@@ -94,12 +95,23 @@ func runServe(cmd *cobra.Command) error {
 		cfg.Whisper.Language, cfg.Whisper.APIKey, cfg.Whisper.Timeout)
 	embedder := clients.NewEmbedder(cfg.Embedder.URL, cfg.Embedder.Timeout)
 	ollama := clients.NewOllama(cfg.Ollama.URL, cfg.Ollama.Model, cfg.Ollama.Timeout)
-	piper := clients.NewPiper(cfg.Piper.Binary, cfg.Piper.Voice, cfg.Piper.SpeakerID,
-		cfg.Piper.Timeout, cfg.Piper.ExtraArgs)
+	piper := clients.NewPiper(clients.PiperOptions{
+		Binary:     cfg.Piper.Binary,
+		Voice:      cfg.Piper.Voice,
+		SpeakerID:  cfg.Piper.SpeakerID,
+		Timeout:    cfg.Piper.Timeout,
+		ExtraArgs:  cfg.Piper.ExtraArgs,
+		Persistent: cfg.Piper.Persistent,
+	})
+	defer piper.Close()
 	if err := piper.Available(); err != nil {
 		// Not fatal: the server is still useful for enrollment and the UI, and
 		// the operator gets a clear line in the log about what is missing.
 		log.Warn("text to speech is unavailable", "error", err)
+	} else if err := piper.Warm(); err != nil {
+		log.Warn("starting the piper process failed", "error", err)
+	} else if cfg.Piper.Persistent {
+		log.Info("text to speech ready", "voice", cfg.Piper.Voice, "persistent", true)
 	}
 
 	systemPrompt, err := loadSystemPrompt(cfg.Ollama.SystemPromptFile)
