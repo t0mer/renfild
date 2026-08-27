@@ -35,8 +35,6 @@ for fixture in "${FIXTURES[@]}"; do
   printf '%s\n' "$text" | "$PIPER" --model "$VOICE" --output_file "$WORK/$name.raw.wav" 2>/dev/null
 
   # Pad with a little silence at each end, mirroring how a satellite frames a
-  # detection, and resample to what the models expect.
-  # Pad with a little silence at each end, mirroring how a satellite frames a
   # detection, and resample to what the models expect. This uses the satellite's
   # own audio helpers, so the fixtures go through the same code path the daemon
   # does.
