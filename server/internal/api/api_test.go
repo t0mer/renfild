@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/rand"
 	"mime/multipart"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/t0mer/renfild/internal/config"
 	"github.com/t0mer/renfild/internal/intent"
@@ -391,16 +393,92 @@ func TestHistoryAudioIsAbsentWhenRetentionIsOff(t *testing.T) {
 	}
 }
 
-func TestSPAFallbackServesTheApp(t *testing.T) {
-	_, handler := newServer(t, "hello")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/speakers", nil))
+// builtSite stands in for the Vite output, which is gitignored: a clean
+// checkout has an empty dist/ and the real embedded filesystem would have
+// nothing to serve.
+func builtSite() fs.FS {
+	return fstest.MapFS{
+		"index.html":             &fstest.MapFile{Data: []byte("<!doctype html><title>Renfild</title>")},
+		"assets/index-abc123.js": &fstest.MapFile{Data: []byte("console.log(1)")},
+		"favicon.svg":            &fstest.MapFile{Data: []byte("<svg/>")},
+	}
+}
 
+func TestSPAServesIndexForClientSideRoutes(t *testing.T) {
+	handler := SPAHandlerFor(builtSite())
+
+	for _, path := range []string{"/", "/speakers", "/history?q=x", "/intents/42"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", path, recorder.Code)
+		}
+		if !strings.Contains(recorder.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("%s content type = %q", path, recorder.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(recorder.Body.String(), "<title>Renfild</title>") {
+			t.Fatalf("%s did not serve index.html", path)
+		}
+		// The router in the browser owns these paths, so the page itself must
+		// never be cached hard.
+		if cache := recorder.Header().Get("Cache-Control"); cache != "no-cache" {
+			t.Fatalf("%s Cache-Control = %q", path, cache)
+		}
+	}
+}
+
+func TestSPAServesRealFiles(t *testing.T) {
+	handler := SPAHandlerFor(builtSite())
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d", recorder.Code)
 	}
-	if !strings.Contains(recorder.Header().Get("Content-Type"), "text/html") {
-		t.Fatalf("content type = %q", recorder.Header().Get("Content-Type"))
+	if recorder.Body.String() != "console.log(1)" {
+		t.Fatalf("body = %q", recorder.Body)
+	}
+	// Vite puts a content hash in every asset name, so they never change.
+	if cache := recorder.Header().Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+		t.Fatalf("Cache-Control = %q, want the assets to be cacheable", cache)
+	}
+
+	// Files outside assets/ are served, but without the immutable promise.
+	plain := httptest.NewRecorder()
+	handler.ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/favicon.svg", nil))
+	if plain.Code != http.StatusOK {
+		t.Fatalf("favicon status = %d", plain.Code)
+	}
+	if strings.Contains(plain.Header().Get("Cache-Control"), "immutable") {
+		t.Fatalf("favicon was marked immutable")
+	}
+}
+
+func TestSPASaysSoWhenTheUIWasNeverBuilt(t *testing.T) {
+	// What a binary built without running the frontend build actually holds.
+	handler := SPAHandlerFor(fstest.MapFS{})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/speakers", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "not built") {
+		t.Fatalf("body = %s, want it to say the UI is missing", recorder.Body)
+	}
+}
+
+// TestSPAIsWiredIntoTheRouter checks the fallback route exists at all; what it
+// serves depends on whether this binary was built with a frontend, so the
+// status is deliberately not asserted.
+func TestSPAIsWiredIntoTheRouter(t *testing.T) {
+	_, handler := newServer(t, "hello")
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/speakers", nil))
+	if recorder.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("the SPA fallback is not routed: %d", recorder.Code)
 	}
 }
 

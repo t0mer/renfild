@@ -9,8 +9,7 @@ import (
 	"github.com/t0mer/renfild/internal/webui"
 )
 
-// SPAHandler serves the embedded single-page app: real files when they exist,
-// index.html for every client-side route.
+// SPAHandler serves the single-page app embedded in this binary.
 func SPAHandler() http.Handler {
 	site, err := webui.FS()
 	if err != nil {
@@ -18,6 +17,14 @@ func SPAHandler() http.Handler {
 			writeError(w, http.StatusInternalServerError, "embedded web UI is unavailable")
 		})
 	}
+	return SPAHandlerFor(site)
+}
+
+// SPAHandlerFor serves a single-page app from any filesystem: real files when
+// they exist, index.html for every client-side route. It takes the filesystem
+// rather than reaching for the embedded one so that its behaviour can be tested
+// without a frontend build sitting on disk.
+func SPAHandlerFor(site fs.FS) http.Handler {
 	files := http.FileServer(http.FS(site))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
