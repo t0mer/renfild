@@ -222,6 +222,24 @@ phrase for this household is **"Hey Renfild"**, and the satellite expects the mo
 5. Check it before trusting it, with the tool below.
 6. `sudo systemctl restart renfild-satellite`, then watch `journalctl -u renfild-satellite -f`.
 
+### Trying the pipeline before you have trained anything
+
+Training needs a GPU and an afternoon, and until it is done the satellite has nothing to
+listen for — the installer deliberately leaves it enabled but stopped rather than
+restart-looping. openWakeWord ships pretrained models inside its own package, so you can
+borrow one to get the rest of the system working end to end:
+
+```bash
+cp /opt/renfild/satellite/.venv/lib/python3*/site-packages/openwakeword/resources/models/hey_jarvis_v0.1.onnx \
+   /opt/renfild/satellite/models/
+# point wake.model_path at it, then
+sudo systemctl start renfild-satellite
+```
+
+`alexa_v0.1`, `hey_mycroft_v0.1` and `hey_rhasspy_v0.1` are there too. Replace it with your
+own model when it is ready; a stranger's wake word is fine for a bring-up, not for a
+household.
+
 > On CPython 3.12 and newer there is no `tflite-runtime` wheel; the satellite transparently
 > uses Google's `ai-edge-litert` interpreter instead, so `.tflite` models still work. Both
 > backends were verified on this Pi against openWakeWord's pretrained `hey_jarvis` model: the
@@ -376,6 +394,118 @@ Templates get `{{.Speaker}}`, `{{.Role}}`, `{{.Transcript}}`, `{{.SatelliteID}}`
 
 ---
 
+## Voices and languages
+
+The installer downloads one voice from
+[rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices); the URL is derived from
+the name, so picking another one is a single setting:
+
+```bash
+sudo PIPER_VOICE=he_IL-saspeech-medium ./install.sh --skip-satellite --skip-embedder --skip-server
+```
+
+### Hebrew
+
+Hebrew works, but not with the default engine. The `rhasspy/piper` release binary has been
+frozen at `2023.11.14` since the project moved, and it cannot load a Hebrew voice at all — it
+aborts on the phoneme map:
+
+```
+[piper] [error] "aɪ" is not a single codepoint (ids=161,)
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  Phonemes must be one codepoint (phoneme id map)
+```
+
+[piper1-gpl](https://github.com/OHF-Voice/piper1-gpl) is the maintained successor and speaks
+it fine. Set `piper.engine: "python"` and point `piper.binary` at
+`/opt/renfild/piper/venv/bin/piper`. `PIPER_ENGINE=auto` (the default) picks it for you when
+the voice name starts with `he_`, and installs it into its own virtualenv.
+
+`he_IL-saspeech-medium` is currently the only Hebrew voice published in that collection.
+
+## Speech to text
+
+Whisper is an external service — `whisper.url` is configuration, not code — so anything
+OpenAI-compatible works. If you do not already have one,
+[`hack/whisper-server.sh`](hack/whisper-server.sh) builds [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+and installs it as a systemd unit:
+
+```bash
+sudo apt-get install -y cmake
+sudo ./hack/whisper-server.sh              # or MODEL=tiny for the fastest
+```
+
+whisper.cpp's server already speaks the OpenAI request shape; it just serves it at
+`/inference`, so the script runs it with `--inference-path /v1/audio/transcriptions` and
+Renfild's `whisper.api: "openai"` works unchanged.
+
+### It is slow on the Pi, and that is the honest answer
+
+Whisper always processes a 30-second window, so a two-second command costs the same as a
+long one. Measured here on a Pi 4 (4 threads, ~2 s of English speech):
+
+| Model | Per command | English | Hebrew |
+|---|---|---|---|
+| `tiny` | **~5.1 s** | accurate | close, two words wrong |
+| `base` | **~14.9 s** | accurate | close, one word wrong |
+| `small` | **~63 s** | accurate | close, one word wrong |
+
+Even `tiny` blows the 2.5 s target on its own. Speech to text is the one component that
+really wants a stronger machine: point `whisper.url` at a desktop, a NAS or a mini PC and the
+Pi goes back to being fast. Everything else in the pipeline is comfortable where it is.
+
+The Hebrew clips were synthesised with Piper, so the errors above are the TTS and the STT
+compounding — a real speaker does better. Set `whisper.language: "he"` rather than leaving it
+on `auto` if the household speaks one language; detection on a two-second command is not
+reliable.
+
+### End to end, measured
+
+A full round trip on this Pi, with `whisper-tiny` local, one enrolled speaker and a rule that
+matches — wake audio in, reply WAV out:
+
+| Stage | Time |
+|---|---|
+| `spk` (embed + match) | 1.4 – 1.8 s, concurrent with `stt` |
+| `stt` (whisper-tiny, local) | 5.2 – 5.6 s |
+| `intent` (rule) | 0 – 11 ms |
+| `tts` (Piper, persistent) | 0.8 – 0.9 s |
+| **total** | **6.0 – 6.5 s** |
+
+Move Whisper off the Pi and that total drops to roughly two seconds, because `stt` stops
+being the whole of it and `spk` is already hidden behind it.
+
+Swap the rule for the LLM fallback and it goes the other way: **12.6 s** warm, **47.4 s** on
+the first call after the model has been unloaded — past the satellite's own 15 s timeout.
+See the next section.
+
+---
+
+## The LLM fallback
+
+Ollama runs on a Pi 4, but not quickly. Measured here with `qwen2.5:1.5b`, which is as large
+as a 4 GB Pi will comfortably hold:
+
+| | Time to a one-sentence answer |
+|---|---|
+| First call after the model is unloaded | **~40 s** |
+| Warm | 4.4 – 9.0 s |
+
+Ollama unloads an idle model after five minutes by default, so an assistant used a few times
+a day would pay the cold cost almost every time. `OLLAMA_KEEP_ALIVE=-1` pins it in memory at
+the cost of about a gigabyte of RAM. Even warm, this is far outside the 2.5 s target and past
+the satellite's 15 s request timeout on a bad day — the LLM fallback is worth having on a
+stronger host, and worth thinking twice about on the Pi. Rules cost under 10 ms; use them for
+anything you say often.
+
+The shipped default is `qwen2.5:7b`, which a 4 GB Pi cannot load at all. That is deliberate —
+the default assumes Ollama lives somewhere else. If you point it at the Pi, drop the model
+size and accept the latency. Renfild handles the failure the way it is supposed to either
+way: an unreachable or missing model produces a spoken *"Sorry, something went wrong."* and a
+`200`, never a raw error to the satellite, with the real reason recorded on the History page.
+
+---
+
 ## Configuration reference
 
 Precedence everywhere: **flags > environment > config file > defaults**.
@@ -400,9 +530,12 @@ Precedence everywhere: **flags > environment > config file > defaults**.
 | `ollama.max_words` | `60` | Hard cap on spoken answers |
 | `ollama.fallback` | `true` | Route unmatched transcripts to the model |
 | `ollama.system_prompt_file` | — | Optional file with your own system prompt |
-| `piper.binary` | `/opt/renfild/piper/piper` | Piper executable |
+| `piper.engine` | `cpp` | `cpp` (the rhasspy/piper binary) or `python` (piper1-gpl). Hebrew voices need `python` |
+| `piper.binary` | `/opt/renfild/piper/piper` | Piper executable. `…/piper/venv/bin/piper` for the `python` engine |
 | `piper.voice` | `…/en_US-lessac-medium.onnx` | Voice model |
 | `piper.speaker_id` | `0` | For multi-speaker voices |
+| `piper.persistent` | `true` | Keep one Piper process alive between replies. Worth about a second per reply |
+| `piper.timeout` | `10s` | Per-reply timeout |
 | `speaker.default_threshold` | `0.45` | Cosine similarity floor |
 | `speaker.unknown_policy` | `restricted` | See the table above |
 | `speaker.low_confidence_margin` | `0.05` | Within this of the threshold, the command audio also gets a vote |
@@ -410,8 +543,8 @@ Precedence everywhere: **flags > environment > config file > defaults**.
 | `speaker.min_sample_similarity` | `0.30` | Enrollment samples below this are rejected |
 
 Flags: `--listen --db --log-level --audio-retention --audio-dir --whisper-url --whisper-api
---whisper-language --embedder-url --ollama-url --ollama-model --piper-binary --piper-voice
---speaker-threshold --unknown-policy --config`.
+--whisper-language --embedder-url --ollama-url --ollama-model --piper-engine --piper-binary
+--piper-voice --piper-persistent --speaker-threshold --unknown-policy --config`.
 
 ### satellite — `/opt/renfild/etc/satellite.yaml` (env prefix `RENFILD_SAT_`, nested keys use `__`)
 
@@ -458,6 +591,9 @@ Example: `RENFILD_SAT_WAKE__THRESHOLD=0.7` overrides `wake.threshold`.
 | `POST` | `/api/v1/utterance` | Satellite endpoint. `multipart/form-data`: `wake`, `command`, `satellite_id`. Returns `200` + `audio/wav`, or `204` when there is nothing to say. Headers: `X-Speaker`, `X-Transcript`, `X-Intent`, `X-Confidence` (percent-encoded UTF-8). |
 | `GET` | `/healthz` | Liveness, with the version |
 | `GET` | `/metrics` | Prometheus: utterance counts by speaker/intent/outcome, per-stage latency histograms, match-confidence histogram |
+
+A Grafana dashboard over these metrics lives in [`grafana/`](grafana/), with the scrape
+config and import instructions.
 | `GET/POST/PUT/DELETE` | `/api/ui/speakers…` | Speaker and enrollment management |
 | `POST` | `/api/ui/speakers/identify` | "Test my voice" — embed and match, storing nothing |
 | `GET/POST/PUT/DELETE` | `/api/ui/intents…` | Rule table CRUD, plus `/reorder` |
@@ -520,27 +656,25 @@ The History page breaks every utterance down by stage. Typically:
 
 | Stage | Measured on a Pi 4 (4 GB) | If it is slow |
 |---|---|---|
-| `spk` (speaker ID) | ~750 ms for a 1.8 s wake snapshot, ~1.3 s for 2.5 s of audio | ECAPA on a Pi 4 CPU. It runs concurrently with `stt`, so it is often not what you are waiting for — but if it is, move the embedder to a stronger host: `embedder.url` is just configuration. |
-| `stt` (Whisper) | 300–1200 ms, depending on the model and where it runs | Use a smaller model, or move it off the Pi |
+| `spk` (speaker ID) | 1.4 – 1.8 s for a 2 s wake snapshot | ECAPA on a Pi 4 CPU. It runs concurrently with `stt`, so it is usually not what you are waiting for — but if it is, move the embedder to a stronger host: `embedder.url` is just configuration. |
+| `stt` (Whisper) | **~5.2 s with whisper-tiny on the Pi**, a few hundred ms on a real machine | This is almost always the answer. See [Speech to text](#speech-to-text) |
 | `intent` | < 10 ms for rules, seconds for `llm` | An LLM reply is never going to be instant; keep `max_words` low |
-| `tts` (Piper) | **~2.0 s for a short reply** | See below — this is usually the biggest number on the page |
+| `tts` (Piper) | **~1.45 s for a short reply** | See below |
 
-**Piper is the bottleneck, and most of it is startup.** The server runs one Piper process per
-reply. On a Pi 4 that costs roughly **0.95 s of fixed process and model loading**, plus about
-0.49 s per second of speech produced:
+**Most of Piper's cost is loading the voice, so the process is kept alive.** With
+`piper.persistent: false` the server spawns Piper per reply and pays roughly a second of
+model loading every time; with it left on (the default) one process is started at boot and
+each reply only pays for synthesis:
 
-| Voice | Reply | Audio produced | Wall time |
+| Engine | Voice | Per reply, one-shot | Per reply, persistent |
 |---|---|---|---|
-| `en_US-lessac-medium` | short | 2.00 s | 1.94 s |
-| `en_US-lessac-medium` | long | 5.46 s | 3.65 s |
-| `en_US-kathleen-low` | short | 2.09 s | 1.83 s |
-| `en_US-kathleen-low` | long | 6.09 s | 3.23 s |
+| `cpp` | `en_US-lessac-medium` | 2.6 s | **1.45 s** |
+| `python` | `he_IL-saspeech-medium` | 6.2 s | **1.4 s** |
 
-A measured end-to-end round trip on this hardware — wake word to reply audio in hand, with a
-mocked Whisper — was **3.4 s**: 757 ms speaker ID, 3 ms transcription, 0 ms routing, 2.6 s
-synthesis. A `low` quality voice saves a little; keeping replies short saves more. The fixed
-second per reply can only be removed by keeping a Piper process alive between utterances,
-which v1 deliberately does not do.
+Both were measured on this Pi with the same sentence, and the persistent figures hold from
+the first reply onwards — the voice is loaded at startup, not on first use. The Python engine
+is slower to start (about six seconds) because it is loading an interpreter and onnxruntime
+as well as the voice, but once warm the two engines are within noise of each other.
 
 The embedder also spends 15–20 seconds loading ECAPA at startup. That happens once, at boot,
 not per utterance.
