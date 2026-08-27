@@ -371,7 +371,8 @@ Handler configuration is JSON:
 // reply — a Go text/template
 { "template": "Good morning {{.Speaker}}. It is {{.Now.Format \"15:04\"}}." }
 
-// webhook — call something, optionally speak its answer
+// webhook — call something, optionally speak its answer.
+// Header values are encrypted at rest and come back masked; see Privacy.
 { "url": "http://nas:8123/api/x", "method": "POST",
   "headers": { "X-Token": "…" },
   "body": "{\"who\":\"{{.Speaker}}\"}",
@@ -524,6 +525,8 @@ Precedence everywhere: **flags > environment > config file > defaults**.
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
 | `audio_retention` | `none` | `none`, `24h`, `7d` — raw audio retention for debugging |
 | `audio_dir` | `/var/lib/renfild/audio` | Where retained audio is written |
+| `secret_key_file` | `/var/lib/renfild/secret.key` | AES-256 key for webhook credentials; generated on first start |
+| `secret_key` | — | The same key as hex (`RENFILD_SECRET_KEY`), instead of a file |
 | `whisper.url` | `http://127.0.0.1:9000` | Whisper endpoint. **There is no working default — point this at your own.** |
 | `whisper.api` | `openai` | `openai` (`/v1/audio/transcriptions`) or `asr` (whisper-asr-webservice) |
 | `whisper.model` | `whisper-1` | Model name, for the OpenAI shape |
@@ -621,8 +624,16 @@ config and import instructions.
 - **The web UI has no authentication in v1.** It assumes a trusted LAN. Do not expose port
   8080 to the internet, and do not put it behind a tunnel without adding authentication in
   front of it. Bind to `127.0.0.1` and use a reverse proxy with auth if you need remote access.
-- Webhook credentials configured in intents are stored in the database; keep it at `0640`
-  and owned by the `renfild` user, as the installer sets it.
+- **Webhook credentials are encrypted at rest** with AES-256-GCM. Header values in a webhook
+  intent are sealed before they reach the database, the web UI is shown `••••••••` rather than
+  the value, and only the intent router ever decrypts one — on its way into the request it was
+  configured for. Everything else about the rule, the URL and body included, stays readable.
+- The key lives in `secret_key_file` (`/var/lib/renfild/secret.key`, mode `0600`, generated on
+  first start). **Back it up with the database**: restoring one without the other leaves the
+  stored credentials unreadable and you will have to retype them. `RENFILD_SECRET_KEY` supplies
+  the same key as hex if you would rather not keep a file.
+- The database itself is still worth protecting — it holds transcripts and embeddings. The
+  installer leaves it at `0640` owned by the `renfild` user.
 
 ---
 

@@ -14,6 +14,13 @@ log_level: "info"
 audio_retention: "none"
 audio_dir: "/var/lib/renfild/audio"
 
+# AES-256 key used to encrypt webhook credentials in the database. Generated on
+# first start if the file does not exist; keep it with your backups, because
+# without it the stored credentials cannot be read back.
+secret_key_file: "/var/lib/renfild/secret.key"
+# secret_key: ""     # the same key as hex, if you would rather not keep a file
+#                    # (RENFILD_SECRET_KEY). Takes precedence over the file.
+
 whisper:
   # Point this at your own Whisper deployment — there is no default that works.
   # Anything OpenAI-compatible will do (speaches, faster-whisper-server, LocalAI),

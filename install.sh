@@ -449,6 +449,9 @@ cat <<DONE
 $(say "Renfild is installed")
     Configuration : $PREFIX/etc/{server,satellite}.yaml, $PREFIX/etc/embedder.env
     Data          : $DATA_DIR/renfild.db
+    Secret key    : $DATA_DIR/secret.key  (written on first start — back it up
+                    with the database; webhook credentials cannot be read
+                    without it)
     Web UI        : http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080
 
 Next steps:
