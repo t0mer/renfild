@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,6 +76,78 @@ func render(name, text string, req Request) (string, error) {
 		return "", fmt.Errorf("executing template: %w", err)
 	}
 	return strings.TrimSpace(buf.String()), nil
+}
+
+// validateHandlerConfig checks handler_config against the shape the chosen
+// handler will decode it into. Without this a config that is valid JSON but the
+// wrong shape — a quoted string instead of an object is the easy mistake —
+// stores happily and only surfaces days later as a spoken "Sorry, something
+// went wrong". The templates are parsed here too, for the same reason.
+func validateHandlerConfig(rule Rule) error {
+	switch rule.Handler {
+	case HandlerReply:
+		var cfg replyConfig
+		if err := decodeConfig(rule.HandlerConfig, &cfg); err != nil {
+			return err
+		}
+		if strings.TrimSpace(cfg.Template) == "" {
+			return fmt.Errorf("reply handler needs a template")
+		}
+		return parseTemplate("template", cfg.Template)
+
+	case HandlerWebhook:
+		var cfg webhookConfig
+		if err := decodeConfig(rule.HandlerConfig, &cfg); err != nil {
+			return err
+		}
+		if strings.TrimSpace(cfg.URL) == "" {
+			return fmt.Errorf("webhook handler needs a url")
+		}
+		// Checked in a fixed order so a rule with two broken templates always
+		// reports the same one.
+		for _, field := range []struct{ name, text string }{
+			{"url", cfg.URL}, {"body", cfg.Body}, {"reply", cfg.Reply},
+		} {
+			if err := parseTemplate(field.name, field.text); err != nil {
+				return err
+			}
+		}
+		if method := strings.ToUpper(strings.TrimSpace(cfg.Method)); method != "" {
+			// http.NewRequest accepts anything token-shaped, so this only
+			// catches the obvious typo of a method with a space in it.
+			if strings.ContainsAny(method, " \t") {
+				return fmt.Errorf("webhook method %q is not a method", cfg.Method)
+			}
+		}
+		if cfg.TimeoutSeconds < 0 {
+			return fmt.Errorf("webhook timeout_seconds must not be negative")
+		}
+
+	case HandlerLLM:
+		var cfg llmConfig
+		if err := decodeConfig(rule.HandlerConfig, &cfg); err != nil {
+			return err
+		}
+		if cfg.MaxWords < 0 {
+			return fmt.Errorf("llm max_words must not be negative")
+		}
+		return parseTemplate("prompt", cfg.Prompt)
+	}
+	return nil
+}
+
+// parseTemplate reports whether a template field would render at all.
+func parseTemplate(field, text string) error {
+	if text == "" {
+		return nil
+	}
+	_, err := template.New(field).Option("missingkey=zero").Parse(text)
+	if err == nil {
+		return nil
+	}
+	// text/template writes "template: <name>:<line>: <what>", and the name is
+	// already the field, so its own prefix would only repeat the word.
+	return errors.New(strings.TrimPrefix(err.Error(), "template: "))
 }
 
 // ReplyHandler speaks a template. The simplest and most common handler.

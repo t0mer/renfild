@@ -69,6 +69,9 @@ func (r *Rule) Validate() error {
 	if len(r.HandlerConfig) > 0 && !json.Valid(r.HandlerConfig) {
 		return fmt.Errorf("handler_config is not valid JSON")
 	}
+	if err := validateHandlerConfig(*r); err != nil {
+		return fmt.Errorf("handler_config: %w", err)
+	}
 	if r.MatchType == MatchRegex {
 		if err := r.Compile(); err != nil {
 			return err

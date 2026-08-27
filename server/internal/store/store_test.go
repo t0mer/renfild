@@ -213,10 +213,14 @@ func TestCreateIntentRejectsAnInvalidRule(t *testing.T) {
 
 func TestRulesReturnsOnlyEnabledIntents(t *testing.T) {
 	db, ctx := newStore(t)
-	id, _ := db.CreateIntent(ctx, intent.Rule{
+	id, err := db.CreateIntent(ctx, intent.Rule{
 		Name: "disabled", Enabled: false, MatchType: intent.MatchContains,
 		Patterns: []string{"x"}, MinRole: speaker.RoleMember, Handler: intent.HandlerReply,
+		HandlerConfig: json.RawMessage(`{"template":"ok"}`),
 	})
+	if err != nil {
+		t.Fatalf("CreateIntent() error: %v", err)
+	}
 
 	enabled, _ := db.Rules(ctx)
 	for _, rule := range enabled {
@@ -238,14 +242,22 @@ func TestRulesReturnsOnlyEnabledIntents(t *testing.T) {
 
 func TestReorderIntents(t *testing.T) {
 	db, ctx := newStore(t)
-	first, _ := db.CreateIntent(ctx, intent.Rule{
+	first, err := db.CreateIntent(ctx, intent.Rule{
 		Name: "a", Enabled: true, MatchType: intent.MatchContains, Patterns: []string{"a"},
 		MinRole: speaker.RoleMember, Handler: intent.HandlerReply, Priority: 10,
+		HandlerConfig: json.RawMessage(`{"template":"a"}`),
 	})
-	second, _ := db.CreateIntent(ctx, intent.Rule{
+	if err != nil {
+		t.Fatalf("CreateIntent(a) error: %v", err)
+	}
+	second, err := db.CreateIntent(ctx, intent.Rule{
 		Name: "b", Enabled: true, MatchType: intent.MatchContains, Patterns: []string{"b"},
 		MinRole: speaker.RoleMember, Handler: intent.HandlerReply, Priority: 20,
+		HandlerConfig: json.RawMessage(`{"template":"b"}`),
 	})
+	if err != nil {
+		t.Fatalf("CreateIntent(b) error: %v", err)
+	}
 
 	if err := db.ReorderIntents(ctx, map[int64]int{second: 10, first: 20}); err != nil {
 		t.Fatalf("ReorderIntents() error: %v", err)

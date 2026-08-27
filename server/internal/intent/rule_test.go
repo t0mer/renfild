@@ -74,6 +74,46 @@ func TestRuleValidate(t *testing.T) {
 		{"invalid json config", func(r *Rule) { r.HandlerConfig = json.RawMessage(`{`) }, true},
 		{"invalid regex", func(r *Rule) { r.MatchType = MatchRegex; r.Patterns = []string{"([a-z"} }, true},
 		{"valid regex", func(r *Rule) { r.MatchType = MatchRegex; r.Patterns = []string{"^hi$"} }, false},
+
+		// handler_config has to survive the handler that will read it, not
+		// merely be JSON: a quoted string is valid JSON and useless here.
+		{"config is a json string", func(r *Rule) {
+			r.HandlerConfig = json.RawMessage(`"{\"template\":\"ok\"}"`)
+		}, true},
+		{"config is an array", func(r *Rule) { r.HandlerConfig = json.RawMessage(`["template"]`) }, true},
+		{"reply without a template", func(r *Rule) { r.HandlerConfig = json.RawMessage(`{}`) }, true},
+		{"reply with no config at all", func(r *Rule) { r.HandlerConfig = nil }, true},
+		{"reply with a broken template", func(r *Rule) {
+			r.HandlerConfig = json.RawMessage(`{"template":"hello {{.Speaker"}`)
+		}, true},
+		{"webhook without a url", func(r *Rule) {
+			r.Handler = HandlerWebhook
+			r.HandlerConfig = json.RawMessage(`{"method":"POST"}`)
+		}, true},
+		{"webhook with a url", func(r *Rule) {
+			r.Handler = HandlerWebhook
+			r.HandlerConfig = json.RawMessage(`{"url":"http://nas:8123/x"}`)
+		}, false},
+		{"webhook with a broken body template", func(r *Rule) {
+			r.Handler = HandlerWebhook
+			r.HandlerConfig = json.RawMessage(`{"url":"http://nas/x","body":"{{.Speaker"}`)
+		}, true},
+		{"webhook with a negative timeout", func(r *Rule) {
+			r.Handler = HandlerWebhook
+			r.HandlerConfig = json.RawMessage(`{"url":"http://nas/x","timeout_seconds":-1}`)
+		}, true},
+		{"llm needs nothing", func(r *Rule) {
+			r.Handler = HandlerLLM
+			r.HandlerConfig = nil
+		}, false},
+		{"llm with a negative word cap", func(r *Rule) {
+			r.Handler = HandlerLLM
+			r.HandlerConfig = json.RawMessage(`{"max_words":-5}`)
+		}, true},
+		{"llm with the wrong type for max_words", func(r *Rule) {
+			r.Handler = HandlerLLM
+			r.HandlerConfig = json.RawMessage(`{"max_words":"sixty"}`)
+		}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
