@@ -191,3 +191,110 @@ func TestTailBufferKeepsOnlyTheTail(t *testing.T) {
 		t.Fatalf("snippet = %q", got)
 	}
 }
+
+// pythonDaemon imitates piper1-gpl: plain text lines in, a file it names
+// itself, and a log line on stderr saying where it went.
+const pythonDaemon = `#!/bin/sh
+echo start >> "$(dirname "$2")/starts"
+n=0
+dir=.
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-d" ]; then dir="$2"; fi
+  shift
+done
+while IFS= read -r line; do
+  n=$((n + 1))
+  printf 'RIFFWAVE' > "$dir/out-$n.wav"
+  echo "INFO:__main__:Wrote $dir/out-$n.wav" >&2
+done
+`
+
+func TestPiperPythonEnginePersistent(t *testing.T) {
+	binary, voice, starts := fakePiperDaemon(t, pythonDaemon)
+
+	piper := NewPiper(PiperOptions{
+		Engine: EnginePiperPython, Binary: binary, Voice: voice,
+		Timeout: 5 * time.Second, Persistent: true,
+	})
+	defer piper.Close()
+
+	for i := range 3 {
+		audio, err := piper.Synthesize(context.Background(), "שלום")
+		if err != nil {
+			t.Fatalf("Synthesize() %d error: %v", i, err)
+		}
+		if string(audio) != "RIFFWAVE" {
+			t.Fatalf("audio %d = %q", i, audio)
+		}
+	}
+	if got := startCount(t, starts); got != 1 {
+		t.Fatalf("piper started %d times, want 1", got)
+	}
+
+	// The engine names its own files, so the client has to clean up what the
+	// acknowledgement pointed at.
+	entries, err := os.ReadDir(piper.proc.dir)
+	if err != nil {
+		t.Fatalf("reading work directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("work directory still holds %d files", len(entries))
+	}
+}
+
+func TestPiperPythonEngineOneShotArguments(t *testing.T) {
+	binary, voice, _ := fakePiperDaemon(t, "#!/bin/sh\ncat > /dev/null\necho \"$@\"\n")
+
+	piper := NewPiper(PiperOptions{
+		Engine: EnginePiperPython, Binary: binary, Voice: voice, SpeakerID: 2,
+		Timeout: 5 * time.Second, ExtraArgs: []string{"--length-scale", "1.1"},
+	})
+	out, err := piper.Synthesize(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Synthesize() error: %v", err)
+	}
+	for _, want := range []string{"-m " + voice, "-s 2", "--length-scale 1.1", "-f -"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("arguments %q are missing %q", out, want)
+		}
+	}
+}
+
+func TestPiperRejectsAnUnknownEngine(t *testing.T) {
+	binary, voice, _ := fakePiperDaemon(t, wellBehavedDaemon)
+
+	piper := NewPiper(PiperOptions{Engine: "espeak", Binary: binary, Voice: voice})
+	if err := piper.Available(); err == nil || !strings.Contains(err.Error(), "espeak") {
+		t.Fatalf("Available() = %v, want a complaint about the engine", err)
+	}
+	if _, err := piper.Synthesize(context.Background(), "hello"); err == nil {
+		t.Fatal("expected Synthesize() to refuse an unknown engine")
+	}
+}
+
+func TestPiperFlattensMultiLineReplies(t *testing.T) {
+	binary, voice, _ := fakePiperDaemon(t, wellBehavedDaemon)
+
+	piper := NewPiper(PiperOptions{Binary: binary, Voice: voice, Timeout: 5 * time.Second, Persistent: true})
+	defer piper.Close()
+
+	// Two lines would otherwise become two utterances and two acknowledgements.
+	audio, err := piper.Synthesize(context.Background(), "first line\n\nsecond line")
+	if err != nil {
+		t.Fatalf("Synthesize() error: %v", err)
+	}
+	if string(audio) != "RIFFWAVE" {
+		t.Fatalf("audio = %q", audio)
+	}
+}
+
+func TestPythonEngineParsesOnlyItsAckLines(t *testing.T) {
+	engine := pythonEngine{}
+	if _, ok := engine.parseAck("INFO:__main__:Loading voice"); ok {
+		t.Fatal("a log line was taken for an acknowledgement")
+	}
+	path, ok := engine.parseAck("INFO:__main__:Wrote /tmp/x/out-1.wav")
+	if !ok || path != "/tmp/x/out-1.wav" {
+		t.Fatalf("parseAck() = %q, %v", path, ok)
+	}
+}

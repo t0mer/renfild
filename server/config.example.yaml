@@ -44,11 +44,19 @@ ollama:
   fallback: true
 
 piper:
+  # 'cpp'    -> the rhasspy/piper release binary (default, English and most voices)
+  # 'python' -> piper1-gpl in /opt/renfild/piper/venv. Hebrew voices need this:
+  #             the C++ build is frozen at 2023.11.14 and aborts on their
+  #             phoneme map with "Phonemes must be one codepoint".
+  engine: "cpp"
   binary: "/opt/renfild/piper/piper"
   voice: "/opt/renfild/piper/voices/en_US-lessac-medium.onnx"
   speaker_id: 0
   timeout: "10s"
-  # extra_args: ["--length_scale", "1.0"]
+  # Keep one piper process alive between replies. Loading the voice costs about
+  # a second on a Pi 4, so this is worth roughly half the time to speech.
+  persistent: true
+  # extra_args: ["--length_scale", "1.0"]   # "--length-scale" on the python engine
 
 speaker:
   # Cosine similarity floor. Expect to tune this per household and microphone;

@@ -3,30 +3,21 @@ package clients
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
 
-// piperRequest is one line of piper's --json-input protocol. Piper answers
-// each line by writing the WAV and echoing the path back on stdout, which
-// gives us a clean per-utterance completion marker.
-type piperRequest struct {
-	Text       string `json:"text"`
-	OutputFile string `json:"output_file"`
-}
-
-// piperProcess is a live piper instance in --json-input mode.
+// piperProcess is a live piper in line-at-a-time mode.
 type piperProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	// acks carries one entry per finished utterance. It is buffered so a
+	// reply that arrives after its request gave up does not wedge the reader.
+	acks   chan string
 	stderr *tailBuffer
 	dir    string
 	// done closes when the process exits, so a request can tell a dead piper
@@ -34,9 +25,9 @@ type piperProcess struct {
 	done chan struct{}
 }
 
-// synthesizePersistent hands one line to the running piper and reads back the
-// WAV it wrote. The mutex serialises requests because the protocol is a single
-// ordered stream: two utterances in flight would interleave their acks.
+// synthesizePersistent hands one utterance to the running piper and reads back
+// the WAV it wrote. The mutex serialises requests because the protocol is a
+// single ordered stream: two in flight would interleave their acknowledgements.
 func (p *Piper) synthesizePersistent(ctx context.Context, text string) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -47,53 +38,44 @@ func (p *Piper) synthesizePersistent(ctx context.Context, text string) ([]byte, 
 	}
 
 	p.seq++
-	output := filepath.Join(proc.dir, fmt.Sprintf("reply-%d.wav", p.seq))
-	defer os.Remove(output)
-
-	line, err := json.Marshal(piperRequest{Text: text, OutputFile: output})
+	line, want, err := p.engine.request(proc.dir, p.seq, text)
 	if err != nil {
-		return nil, fmt.Errorf("encoding piper request: %w", err)
+		return nil, err
 	}
-	if _, err := proc.stdin.Write(append(line, '\n')); err != nil {
+	if want != "" {
+		defer os.Remove(want)
+	}
+
+	if _, err := io.WriteString(proc.stdin, line+"\n"); err != nil {
 		p.stopLocked()
 		return nil, fmt.Errorf("writing to piper: %w (%s)", err, proc.stderr.snippet())
 	}
 
-	ack := make(chan struct {
-		line string
-		err  error
-	}, 1)
-	go func() {
-		got, err := proc.stdout.ReadString('\n')
-		ack <- struct {
-			line string
-			err  error
-		}{got, err}
-	}()
-
+	var path string
 	select {
 	case <-ctx.Done():
-		// A half-finished utterance leaves the pipe out of step with us, so
+		// A half-finished utterance leaves the stream out of step with us, so
 		// the process cannot be reused.
 		p.stopLocked()
 		return nil, fmt.Errorf("piper timed out after %s", p.timeout())
 	case <-proc.done:
 		p.stopLocked()
 		return nil, fmt.Errorf("piper exited (%s)", proc.stderr.snippet())
-	case got := <-ack:
-		if got.err != nil {
-			p.stopLocked()
-			return nil, fmt.Errorf("reading from piper: %w (%s)", got.err, proc.stderr.snippet())
-		}
-		if strings.TrimSpace(got.line) != output {
-			// Piper answered about a different utterance: the stream is
-			// desynchronised and the only safe move is a fresh process.
-			p.stopLocked()
-			return nil, fmt.Errorf("piper acknowledged %q, expected %q", strings.TrimSpace(got.line), output)
-		}
+	case path = <-proc.acks:
 	}
 
-	audio, err := os.ReadFile(output)
+	if want != "" && path != want {
+		// Piper answered about a different utterance: the stream is
+		// desynchronised and the only safe move is a fresh process.
+		p.stopLocked()
+		return nil, fmt.Errorf("piper acknowledged %q, expected %q", path, want)
+	}
+	if want == "" {
+		// The engine named the file, so this is the one to clean up.
+		defer os.Remove(path)
+	}
+
+	audio, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading piper output: %w (%s)", err, proc.stderr.snippet())
 	}
@@ -137,10 +119,9 @@ func (p *Piper) ensureProcess() (*piperProcess, error) {
 		return nil, fmt.Errorf("creating piper work directory: %w", err)
 	}
 
-	args := append(p.voiceArgs(), "--json-input", "--output_dir", dir)
-	cmd := exec.Command(p.opts.Binary, args...)
+	cmd := exec.Command(p.opts.Binary, p.engine.daemonArgs(p.opts, dir)...)
 	cmd.Dir = dir
-	// Without a delay, Wait blocks until every writer to the stderr pipe is
+	// Without a delay, Wait blocks until every writer to the output pipes is
 	// gone, so a stray grandchild could hold shutdown open indefinitely.
 	cmd.WaitDelay = 2 * time.Second
 
@@ -149,16 +130,24 @@ func (p *Piper) ensureProcess() (*piperProcess, error) {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("piper stdin: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, fmt.Errorf("piper stdout: %w", err)
-	}
+
 	// Piper logs a line per utterance; keeping only the tail means a long-lived
 	// process cannot grow a buffer without bound, and an error still has
 	// context attached.
-	stderrTail := &tailBuffer{limit: 4096}
-	cmd.Stderr = stderrTail
+	tail := &tailBuffer{limit: 4096}
+	var acked io.Reader
+	if p.engine.acksOnStderr() {
+		// piper1-gpl announces each finished file among its log lines, so the
+		// reader has to sort acknowledgements from noise.
+		acked, err = cmd.StderrPipe()
+	} else {
+		acked, err = cmd.StdoutPipe()
+		cmd.Stderr = tail
+	}
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("piper output: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(dir)
@@ -168,11 +157,12 @@ func (p *Piper) ensureProcess() (*piperProcess, error) {
 	proc := &piperProcess{
 		cmd:    cmd,
 		stdin:  stdin,
-		stdout: bufio.NewReader(stdout),
-		stderr: stderrTail,
+		acks:   make(chan string, 1),
+		stderr: tail,
 		dir:    dir,
 		done:   make(chan struct{}),
 	}
+	go readAcks(acked, p.engine, tail, proc.acks)
 	go func() {
 		cmd.Wait()
 		close(proc.done)
@@ -180,6 +170,28 @@ func (p *Piper) ensureProcess() (*piperProcess, error) {
 
 	p.proc = proc
 	return proc, nil
+}
+
+// readAcks routes completion notices to the request in flight and everything
+// else to the tail buffer.
+func readAcks(r io.Reader, engine piperEngine, tail *tailBuffer, acks chan<- string) {
+	scanner := bufio.NewScanner(r)
+	// A path or a log line, but a voice that mangles its input could produce a
+	// long one; give the scanner room before it gives up.
+	scanner.Buffer(make([]byte, 0, 8*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if path, ok := engine.parseAck(line); ok {
+			select {
+			case acks <- path:
+			default:
+				// Nobody is waiting: the request gave up and this process is
+				// on its way out.
+			}
+			continue
+		}
+		tail.Write([]byte(line + "\n"))
+	}
 }
 
 // Close shuts the persistent process down. It is safe to call on a one-shot

@@ -20,7 +20,13 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPER_VERSION="${PIPER_VERSION:-2023.11.14-2}"
 PIPER_BASE_URL="${PIPER_BASE_URL:-https://github.com/rhasspy/piper/releases/download}"
 PIPER_VOICE="${PIPER_VOICE:-en_US-lessac-medium}"
-PIPER_VOICE_URL="${PIPER_VOICE_URL:-https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium}"
+PIPER_VOICES_BASE="${PIPER_VOICES_BASE:-https://huggingface.co/rhasspy/piper-voices/resolve/main}"
+PIPER_VOICE_URL="${PIPER_VOICE_URL:-}"
+# cpp | python | auto. The C++ release binary is frozen at 2023.11.14 and
+# aborts on voices whose phoneme map came later, Hebrew among them; piper1-gpl
+# is the maintained successor and handles them.
+PIPER_ENGINE="${PIPER_ENGINE:-auto}"
+PIPER_TTS_VERSION="${PIPER_TTS_VERSION:-1.7.0}"
 SILERO_VAD_URL="${SILERO_VAD_URL:-https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx}"
 
 INSTALL_SERVER=1
@@ -28,6 +34,9 @@ INSTALL_SATELLITE=1
 INSTALL_EMBEDDER=1
 INSTALL_PIPER=1
 START_SERVICES=1
+# Set when this run creates server.yaml, so the Piper step knows whether it may
+# edit it or has to leave an operator's own settings alone.
+CONFIG_WAS_WRITTEN=0
 
 # ---------------------------------------------------------------------------
 # output helpers
@@ -51,7 +60,14 @@ Options:
 
 Environment overrides:
   PREFIX (default /opt/renfild), DATA_DIR (/var/lib/renfild),
-  SERVICE_USER (renfild), PIPER_VERSION, PIPER_VOICE, SILERO_VAD_URL
+  SERVICE_USER (renfild), PIPER_VERSION, PIPER_VOICE, PIPER_ENGINE,
+  PIPER_VOICE_URL, SILERO_VAD_URL
+
+Voices:
+  PIPER_VOICE names a voice from https://huggingface.co/rhasspy/piper-voices,
+  for example en_US-lessac-medium or he_IL-saspeech-medium; the download URL is
+  derived from the name. Hebrew needs PIPER_ENGINE=python, which 'auto' picks
+  for you.
 USAGE
 }
 
@@ -174,6 +190,7 @@ install_server() {
   if [ ! -f "$PREFIX/etc/server.yaml" ]; then
     install -m 0640 -o "$SERVICE_USER" -g "$SERVICE_USER" \
       "$SOURCE_DIR/server/config.example.yaml" "$PREFIX/etc/server.yaml"
+    CONFIG_WAS_WRITTEN=1
     info "wrote $PREFIX/etc/server.yaml — review it before starting"
   else
     info "keeping the existing $PREFIX/etc/server.yaml"
@@ -257,34 +274,122 @@ PY
 # ---------------------------------------------------------------------------
 # piper
 # ---------------------------------------------------------------------------
-install_piper() {
-  say "installing Piper ($PIPER_VERSION, $ARCH)"
+# resolve_piper_engine picks the build to drive from PIPER_ENGINE, resolving
+# 'auto' from the voice: only piper1-gpl can load a Hebrew phoneme map.
+resolve_piper_engine() {
+  case "$PIPER_ENGINE" in
+    cpp|python) echo "$PIPER_ENGINE" ;;
+    auto)
+      case "$PIPER_VOICE" in
+        he_*) echo python ;;
+        *)    echo cpp ;;
+      esac
+      ;;
+    *) die "PIPER_ENGINE must be cpp, python or auto (got '$PIPER_ENGINE')" ;;
+  esac
+}
+
+# voice_url derives the download directory from a voice name, so that
+# PIPER_VOICE=he_IL-saspeech-medium is all an operator has to set.
+# en_US-lessac-medium -> .../en/en_US/lessac/medium
+voice_url() {
+  if [ -n "$PIPER_VOICE_URL" ]; then
+    echo "$PIPER_VOICE_URL"
+    return
+  fi
+  local locale rest name quality family
+  locale="${PIPER_VOICE%%-*}"       # en_US
+  rest="${PIPER_VOICE#*-}"          # lessac-medium
+  name="${rest%%-*}"                # lessac
+  quality="${rest##*-}"             # medium
+  family="${locale%%_*}"            # en
+  if [ "$locale" = "$PIPER_VOICE" ] || [ "$name" = "$rest" ]; then
+    die "cannot derive a URL for voice '$PIPER_VOICE' — set PIPER_VOICE_URL"
+  fi
+  echo "$PIPER_VOICES_BASE/$family/$locale/$name/$quality"
+}
+
+# install_piper_cpp fetches the rhasspy/piper release binary and its libraries.
+install_piper_cpp() {
   if [ -x "$PREFIX/piper/piper" ]; then
     info "piper is already installed — skipping the download"
+    return
+  fi
+  local asset tmp
+  asset="$(piper_asset)"
+  tmp="$(mktemp -d)"
+  if download "$PIPER_BASE_URL/$PIPER_VERSION/$asset" "$tmp/$asset"; then
+    tar -xzf "$tmp/$asset" -C "$tmp"
+    # The archive contains a piper/ directory with the binary and its libs.
+    cp -r "$tmp/piper/." "$PREFIX/piper/"
+    chmod 0755 "$PREFIX/piper/piper"
+    info "installed piper -> $PREFIX/piper/piper"
   else
-    local asset tmp
-    asset="$(piper_asset)"
-    tmp="$(mktemp -d)"
-    if download "$PIPER_BASE_URL/$PIPER_VERSION/$asset" "$tmp/$asset"; then
-      tar -xzf "$tmp/$asset" -C "$tmp"
-      # The archive contains a piper/ directory with the binary and its libs.
-      cp -r "$tmp/piper/." "$PREFIX/piper/"
-      chmod 0755 "$PREFIX/piper/piper"
-      info "installed piper -> $PREFIX/piper/piper"
-    else
-      warn "could not download Piper — install it manually into $PREFIX/piper"
-    fi
-    rm -rf "$tmp"
+    warn "could not download Piper — install it manually into $PREFIX/piper"
+  fi
+  rm -rf "$tmp"
+}
+
+# install_piper_python installs piper1-gpl into its own virtualenv. It is a
+# Python package rather than a static binary, so it gets the same treatment as
+# the other two Python components.
+install_piper_python() {
+  if [ ! -x "$PREFIX/piper/venv/bin/python" ]; then
+    info "creating the piper virtualenv (this takes a while on a Pi)"
+    python3 -m venv "$PREFIX/piper/venv"
+  fi
+  "$PREFIX/piper/venv/bin/pip" install --quiet --upgrade pip wheel
+  info "installing piper-tts $PIPER_TTS_VERSION"
+  "$PREFIX/piper/venv/bin/pip" install --quiet "piper-tts==$PIPER_TTS_VERSION"
+  info "installed piper -> $PREFIX/piper/venv/bin/piper"
+}
+
+install_piper() {
+  local engine url
+  engine="$(resolve_piper_engine)"
+  say "installing Piper ($engine, voice $PIPER_VOICE, $ARCH)"
+
+  if [ "$engine" = "python" ]; then
+    install_piper_python
+  else
+    install_piper_cpp
   fi
 
   if [ ! -f "$PREFIX/piper/voices/$PIPER_VOICE.onnx" ]; then
-    download "$PIPER_VOICE_URL/$PIPER_VOICE.onnx" "$PREFIX/piper/voices/$PIPER_VOICE.onnx" \
-      && download "$PIPER_VOICE_URL/$PIPER_VOICE.onnx.json" "$PREFIX/piper/voices/$PIPER_VOICE.onnx.json" \
-      || warn "could not download the voice — see https://huggingface.co/rhasspy/piper-voices"
+    url="$(voice_url)"
+    download "$url/$PIPER_VOICE.onnx" "$PREFIX/piper/voices/$PIPER_VOICE.onnx" \
+      && download "$url/$PIPER_VOICE.onnx.json" "$PREFIX/piper/voices/$PIPER_VOICE.onnx.json" \
+      || warn "could not download the voice from $url — see https://huggingface.co/rhasspy/piper-voices"
   else
     info "voice $PIPER_VOICE is already present"
   fi
   chown -R "$SERVICE_USER:$SERVICE_USER" "$PREFIX/piper"
+
+  configure_piper "$engine"
+}
+
+# configure_piper points a freshly written server.yaml at the engine and voice
+# that were just installed. An existing config is left alone.
+configure_piper() { # engine
+  local engine="$1" config="$PREFIX/etc/server.yaml" binary
+  [ -f "$config" ] || return 0
+  if [ "$engine" = "python" ]; then
+    binary="$PREFIX/piper/venv/bin/piper"
+  else
+    binary="$PREFIX/piper/piper"
+  fi
+
+  if [ "$CONFIG_WAS_WRITTEN" -eq 0 ]; then
+    info "leaving piper settings in $config alone — set engine: \"$engine\", binary: \"$binary\" and voice yourself"
+    return 0
+  fi
+
+  sed -i \
+    -e "s|^  engine: .*|  engine: \"$engine\"|" \
+    -e "s|^  binary: .*|  binary: \"$binary\"|" \
+    -e "s|^  voice: .*|  voice: \"$PREFIX/piper/voices/$PIPER_VOICE.onnx\"|" \
+    "$config"
+  info "pointed $config at the $engine engine and $PIPER_VOICE"
 }
 
 # ---------------------------------------------------------------------------

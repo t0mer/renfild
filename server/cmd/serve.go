@@ -53,6 +53,7 @@ func addServeFlags(flags *pflag.FlagSet) {
 	flags.String("embedder-url", "", "embedder sidecar base URL")
 	flags.String("ollama-url", "", "Ollama base URL")
 	flags.String("ollama-model", "", "Ollama model name")
+	flags.String("piper-engine", "", "piper build: cpp or python")
 	flags.String("piper-binary", "", "path to the piper binary")
 	flags.String("piper-voice", "", "path to the piper voice model")
 	flags.Bool("piper-persistent", true, "keep one piper process alive between replies")
@@ -96,6 +97,7 @@ func runServe(cmd *cobra.Command) error {
 	embedder := clients.NewEmbedder(cfg.Embedder.URL, cfg.Embedder.Timeout)
 	ollama := clients.NewOllama(cfg.Ollama.URL, cfg.Ollama.Model, cfg.Ollama.Timeout)
 	piper := clients.NewPiper(clients.PiperOptions{
+		Engine:     cfg.Piper.Engine,
 		Binary:     cfg.Piper.Binary,
 		Voice:      cfg.Piper.Voice,
 		SpeakerID:  cfg.Piper.SpeakerID,
@@ -111,7 +113,8 @@ func runServe(cmd *cobra.Command) error {
 	} else if err := piper.Warm(); err != nil {
 		log.Warn("starting the piper process failed", "error", err)
 	} else if cfg.Piper.Persistent {
-		log.Info("text to speech ready", "voice", cfg.Piper.Voice, "persistent", true)
+		log.Info("text to speech ready", "engine", cfg.Piper.Engine,
+			"voice", cfg.Piper.Voice, "persistent", true)
 	}
 
 	systemPrompt, err := loadSystemPrompt(cfg.Ollama.SystemPromptFile)

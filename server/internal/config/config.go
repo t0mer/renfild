@@ -63,6 +63,10 @@ type Ollama struct {
 
 // Piper describes the local text-to-speech binary.
 type Piper struct {
+	// Engine selects the build being driven: "cpp" for the rhasspy/piper
+	// release binary, "python" for piper1-gpl. Hebrew voices need "python";
+	// the C++ build is frozen at 2023.11.14 and rejects their phoneme map.
+	Engine    string        `mapstructure:"engine" json:"engine"`
 	Binary    string        `mapstructure:"binary" json:"binary"`
 	Voice     string        `mapstructure:"voice" json:"voice"`
 	SpeakerID int           `mapstructure:"speaker_id" json:"speaker_id"`
@@ -106,6 +110,12 @@ const (
 	WhisperAPIASR    = "asr"
 )
 
+// Piper engines.
+const (
+	PiperEngineCPP    = "cpp"
+	PiperEnginePython = "python"
+)
+
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("listen", ":8080")
 	v.SetDefault("db", "/var/lib/renfild/renfild.db")
@@ -128,6 +138,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ollama.max_words", 60)
 	v.SetDefault("ollama.fallback", true)
 
+	v.SetDefault("piper.engine", PiperEngineCPP)
 	v.SetDefault("piper.binary", "/opt/renfild/piper/piper")
 	v.SetDefault("piper.voice", "/opt/renfild/piper/voices/en_US-lessac-medium.onnx")
 	v.SetDefault("piper.speaker_id", 0)
@@ -204,6 +215,7 @@ var flagKeys = map[string]string{
 	"embedder-url":      "embedder.url",
 	"ollama-url":        "ollama.url",
 	"ollama-model":      "ollama.model",
+	"piper-engine":      "piper.engine",
 	"piper-binary":      "piper.binary",
 	"piper-voice":       "piper.voice",
 	"piper-persistent":  "piper.persistent",
@@ -229,6 +241,12 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("whisper.api: unknown value %q (want %q or %q)",
 			c.Whisper.API, WhisperAPIOpenAI, WhisperAPIASR)
+	}
+	switch c.Piper.Engine {
+	case PiperEngineCPP, PiperEnginePython:
+	default:
+		return fmt.Errorf("piper.engine: unknown value %q (want %q or %q)",
+			c.Piper.Engine, PiperEngineCPP, PiperEnginePython)
 	}
 	switch c.AudioRetention {
 	case "none", "24h", "7d":

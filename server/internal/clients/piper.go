@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +19,9 @@ type TTS interface {
 
 // PiperOptions configures the Piper text-to-speech client.
 type PiperOptions struct {
+	// Engine is "cpp" (the rhasspy/piper release binary, the default) or
+	// "python" (piper1-gpl, the one that can speak Hebrew).
+	Engine    string
 	Binary    string
 	Voice     string
 	SpeakerID int
@@ -28,17 +30,21 @@ type PiperOptions struct {
 	// such as --length_scale.
 	ExtraArgs []string
 	// Persistent keeps one piper process alive between replies instead of
-	// spawning it per utterance. Loading the voice costs about a second on a
+	// spawning it per utterance. Loading the voice costs a second or more on a
 	// Pi 4 and a typical answer is only two seconds of audio, so paying that
 	// once at startup rather than on every reply nearly halves time-to-speech.
 	Persistent bool
 }
 
-// Piper drives the Piper binary. In one-shot mode it feeds text on stdin and
-// reads a WAV back from stdout. In persistent mode it keeps a process alive in
-// --json-input mode and exchanges one line per utterance; see piper_daemon.go.
+// Piper drives a Piper build. In one-shot mode it feeds text on stdin and reads
+// a WAV back from stdout. In persistent mode it keeps a process alive and
+// exchanges one line per utterance; see piper_daemon.go.
 type Piper struct {
-	opts PiperOptions
+	opts   PiperOptions
+	engine piperEngine
+	// engineErr defers an unknown-engine name to the first call, so building a
+	// client never fails and the operator sees the problem in one place.
+	engineErr error
 
 	mu   sync.Mutex
 	proc *piperProcess
@@ -47,11 +53,16 @@ type Piper struct {
 
 // NewPiper builds a Piper TTS client.
 func NewPiper(opts PiperOptions) *Piper {
-	return &Piper{opts: opts}
+	engine, err := engineFor(opts.Engine)
+	return &Piper{opts: opts, engine: engine, engineErr: err}
 }
 
-// Available reports whether the binary and the voice model are both present.
+// Available reports whether the engine is known and the binary and the voice
+// model are both present.
 func (p *Piper) Available() error {
+	if p.engineErr != nil {
+		return p.engineErr
+	}
 	if _, err := os.Stat(p.opts.Binary); err != nil {
 		return fmt.Errorf("piper binary %s: %w", p.opts.Binary, err)
 	}
@@ -69,18 +80,9 @@ func (p *Piper) timeout() time.Duration {
 	return p.opts.Timeout
 }
 
-// voiceArgs are the arguments shared by both modes.
-func (p *Piper) voiceArgs() []string {
-	args := []string{"--model", p.opts.Voice}
-	if p.opts.SpeakerID > 0 {
-		args = append(args, "--speaker", strconv.Itoa(p.opts.SpeakerID))
-	}
-	return append(args, p.opts.ExtraArgs...)
-}
-
 // Synthesize speaks text and returns a WAV blob.
 func (p *Piper) Synthesize(ctx context.Context, text string) ([]byte, error) {
-	text = strings.TrimSpace(text)
+	text = flatten(text)
 	if text == "" {
 		return nil, fmt.Errorf("nothing to synthesize")
 	}
@@ -97,13 +99,17 @@ func (p *Piper) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	return p.synthesizeOneShot(ctx, text)
 }
 
+// flatten collapses a reply onto one line. Every piper build splits stdin on
+// newlines, so a two-line reply would otherwise become two utterances and, in
+// persistent mode, two acknowledgements for one request.
+func flatten(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
 // synthesizeOneShot spawns piper, hands it the text and collects the WAV it
 // writes to stdout.
 func (p *Piper) synthesizeOneShot(ctx context.Context, text string) ([]byte, error) {
-	// "--output_file -" makes Piper write a complete WAV to stdout.
-	args := append(p.voiceArgs(), "--output_file", "-")
-
-	cmd := exec.CommandContext(ctx, p.opts.Binary, args...)
+	cmd := exec.CommandContext(ctx, p.opts.Binary, p.engine.oneShotArgs(p.opts)...)
 	cmd.Stdin = strings.NewReader(text + "\n")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
