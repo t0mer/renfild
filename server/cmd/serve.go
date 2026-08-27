@@ -195,8 +195,12 @@ func runServe(cmd *cobra.Command) error {
 	return nil
 }
 
-// pruneAudio deletes retained recordings once they age out.
+// pruneAudio deletes retained recordings once they age out. The first pass runs
+// straight away: a server that was off for a week would otherwise sit on
+// expired audio for another hour after coming back.
 func pruneAudio(ctx context.Context, db *store.Store, window time.Duration, log *slog.Logger) {
+	prunePass(ctx, db, window, log)
+
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
@@ -204,24 +208,42 @@ func pruneAudio(ctx context.Context, db *store.Store, window time.Duration, log 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			paths, err := db.PruneAudio(ctx, time.Now().Add(-window))
-			if err != nil {
-				log.Warn("pruning audio failed", "error", err)
-				continue
-			}
-			for _, path := range paths {
-				// Remove the command recording and its wake companion.
-				for _, candidate := range []string{path, strings.Replace(path, "-command.wav", "-wake.wav", 1)} {
-					if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
-						log.Warn("removing expired audio failed", "path", candidate, "error", err)
-					}
-				}
-			}
-			if len(paths) > 0 {
-				log.Info("pruned expired audio", "count", len(paths))
-			}
+			prunePass(ctx, db, window, log)
 		}
 	}
+}
+
+// prunePass clears one batch of expired recordings and reports how many
+// utterances it freed.
+func prunePass(ctx context.Context, db *store.Store, window time.Duration, log *slog.Logger) int {
+	paths, err := db.PruneAudio(ctx, time.Now().Add(-window))
+	if err != nil {
+		log.Warn("pruning audio failed", "error", err)
+		return 0
+	}
+
+	days := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		// Only the command recording is in the database; its wake companion
+		// sits beside it under the same timestamp.
+		wake := strings.TrimSuffix(path, "-command.wav") + "-wake.wav"
+		for _, candidate := range []string{path, wake} {
+			if err := os.Remove(candidate); err != nil && !os.IsNotExist(err) {
+				log.Warn("removing expired audio failed", "path", candidate, "error", err)
+			}
+		}
+		days[filepath.Dir(path)] = struct{}{}
+	}
+	// Retention writes one directory per day. Remove the ones this pass
+	// emptied; os.Remove leaves any that still hold recordings alone.
+	for day := range days {
+		os.Remove(day)
+	}
+
+	if len(paths) > 0 {
+		log.Info("pruned expired audio", "count", len(paths))
+	}
+	return len(paths)
 }
 
 func loadSystemPrompt(path string) (string, error) {
