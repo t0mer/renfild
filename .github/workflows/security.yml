@@ -17,7 +17,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Scan the repository
-        uses: aquasecurity/trivy-action@0.28.0
+        # Pinned to the v0.36.0 commit: a scanner that silently changes what it
+        # reports is worse than one that is a version behind.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
@@ -35,6 +37,11 @@ jobs:
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
+      # The toolchain comes from the go directive in server/go.mod, so that
+      # line is the security floor for the standard library as well as the
+      # language version: a stdlib advisory is fixed by raising it.
+      # govulncheck itself is deliberately unpinned — a vulnerability scanner
+      # a year behind is worse than one that changes under you.
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
