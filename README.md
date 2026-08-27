@@ -384,6 +384,11 @@ Handler configuration is JSON:
 Templates get `{{.Speaker}}`, `{{.Role}}`, `{{.Transcript}}`, `{{.SatelliteID}}`,
 `{{.Confidence}}`, `{{.Known}}` and `{{.Now}}`.
 
+`handler_config` is checked against the handler that will read it when you save the rule, and
+the templates are parsed at the same time — a missing `template`, a webhook with no `url` or
+an unclosed `{{` comes back as an error in the editor rather than as a spoken *"Sorry,
+something went wrong"* the next time someone triggers the rule.
+
 **Unknown voices** are governed by `speaker.unknown_policy`:
 
 | Policy | Behaviour |
