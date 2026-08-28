@@ -21,11 +21,33 @@ cleanup() {
 trap cleanup EXIT
 
 say() { printf '\n\033[36m==> %s\033[0m\n' "$1"; }
-fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
+
+# fail dumps everything that might explain the failure before giving up. On a CI
+# runner this output is the only evidence there is.
+fail() {
+  printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2
+  for artefact in server.log headers.txt enroll.json history.json; do
+    if [ -s "$WORK/$artefact" ]; then
+      printf '\n----- %s -----\n' "$artefact" >&2
+      tail -40 "$WORK/$artefact" >&2
+    fi
+  done
+  if [ -f "$WORK/reply.wav" ]; then
+    printf '\n----- reply.wav: %s bytes, starts %s -----\n' \
+      "$(wc -c < "$WORK/reply.wav")" "$(head -c 16 "$WORK/reply.wav" | od -c | head -1)" >&2
+  fi
+  exit 1
+}
 
 # --------------------------------------------------------------------------
 # Fixtures: a one-second silent WAV, and a fake Piper that emits one too.
 # --------------------------------------------------------------------------
+for port in "$PORT" "$MOCK_PORT"; do
+  if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ":$port "; then
+    fail "port $port is already in use — set E2E_PORT / E2E_MOCK_PORT"
+  fi
+done
+
 say "building fixtures in $WORK"
 python3 - "$WORK/audio.wav" <<'PY'
 import struct, sys, wave
@@ -64,7 +86,7 @@ touch "$WORK/voice.onnx"
 say "starting mock whisper + embedder on :$MOCK_PORT"
 python3 - "$MOCK_PORT" <<'PY' &
 import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EMBEDDING = [0.05 * ((i % 7) - 3) for i in range(192)]
 
@@ -91,9 +113,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+# Threading matters: the pipeline embeds the wake audio and transcribes the
+# command concurrently, and a single-threaded mock makes them queue.
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 PY
 PIDS+=($!)
+
+# A mock that never bound is otherwise indistinguishable from a broken
+# pipeline: the server just fails every call and the utterance comes back
+# wrong.
+for _ in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:$MOCK_PORT/healthz" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl -fsS "http://127.0.0.1:$MOCK_PORT/healthz" >/dev/null 2>&1 \
+  || fail "the mock whisper/embedder never came up on :$MOCK_PORT"
 
 # --------------------------------------------------------------------------
 # Config + server
@@ -111,17 +145,13 @@ piper: { binary: "$WORK/piper", voice: "$WORK/voice.onnx", timeout: "10s" }
 speaker: { default_threshold: 0.45, unknown_policy: "restricted", enrollment_samples: 1, min_sample_similarity: 0.3 }
 CONFIG
 
-if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ":$PORT "; then
-  fail "port $PORT is already in use — set E2E_PORT to something else"
-fi
-
 say "building the server"
 # Build once rather than using `go run`, so the process we start is the one we
 # can stop, and startup is not competing with the compiler.
 (cd "$ROOT/server" && CGO_ENABLED=0 go build -o "$WORK/renfild" .) || fail "build failed"
 
 say "starting the server on :$PORT"
-"$WORK/renfild" serve --config "$WORK/config.yaml" &
+"$WORK/renfild" serve --config "$WORK/config.yaml" > "$WORK/server.log" 2>&1 &
 PIDS+=($!)
 
 for _ in $(seq 1 60); do
