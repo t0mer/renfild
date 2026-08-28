@@ -24,6 +24,11 @@ jobs:
         run: cd server && test -z "$(gofmt -l .)"
       - name: Test
         run: cd server && go test -cover ./...
+      # The unit tests fake each client in isolation; this runs the real
+      # server against mocked externals and checks an utterance comes out the
+      # far end. It is how a change to the Piper protocol gets caught.
+      - name: End to end
+        run: ./hack/e2e.sh
 
   web:
     name: Web UI
