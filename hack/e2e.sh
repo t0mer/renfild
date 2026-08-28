@@ -34,10 +34,25 @@ with wave.open(sys.argv[1], "wb") as out:
     out.writeframes(struct.pack("<16000h", *([0] * 16000)))
 PY
 
-cat > "$WORK/piper" <<PIPER
+# The fake speaks both Piper dialects, because which one the server uses
+# depends on piper.persistent: --json-input takes a request per line and
+# echoes back the path it wrote, and one-shot mode reads the text on stdin
+# and writes a WAV to stdout.
+cat > "$WORK/piper" <<'PIPER'
 #!/usr/bin/env bash
+audio="$(dirname "$0")/audio.wav"
+for arg in "$@"; do
+  if [ "$arg" = "--json-input" ]; then
+    while IFS= read -r line; do
+      out="$(printf '%s' "$line" | sed 's/.*"output_file":"\([^"]*\)".*/\1/')"
+      cp "$audio" "$out"
+      echo "$out"
+    done
+    exit 0
+  fi
+done
 cat > /dev/null
-cat "$WORK/audio.wav"
+cat "$audio"
 PIPER
 chmod +x "$WORK/piper"
 touch "$WORK/voice.onnx"
