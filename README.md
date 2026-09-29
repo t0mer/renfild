@@ -16,6 +16,31 @@ hardware. Nothing leaves your network.
 - 🧠 **Rules first, LLM second** — a deterministic rule table you own, with a local Ollama fallback.
 - 🔒 **Local only** — no cloud, no telemetry, no Home Assistant dependency. Raw audio is not stored by default.
 - 📦 **No Docker** — three systemd units, one installer, native on Raspberry Pi OS.
+- 🖥️ **Web UI** — dashboard, speaker enrollment, rule editor, history and settings, embedded in the server binary.
+- 📈 **Prometheus metrics** — per-stage latency and match confidence, with a ready-made [Grafana dashboard](grafana/).
+
+## Contents
+
+- [Architecture](#architecture)
+- [Hardware](#hardware)
+- [Quickstart](#quickstart)
+- [Components](#components)
+- [The web UI](#the-web-ui)
+- [Training a wake word](#training-a-wake-word)
+- [Enrolling a speaker](#enrolling-a-speaker)
+- [Intents](#intents)
+- [Voices and languages](#voices-and-languages)
+- [Speech to text](#speech-to-text)
+- [The LLM fallback](#the-llm-fallback)
+- [Configuration reference](#configuration-reference)
+- [API](#api)
+- [Monitoring](#monitoring)
+- [Privacy](#privacy)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -57,8 +82,9 @@ One utterance, end to end:
 3. Silero VAD records the command until **700 ms of silence** (or 10 s, whichever comes first).
 4. The server embeds `wake.wav` and transcribes `command.wav` **concurrently**.
 5. The embedding is matched against every enrolled speaker by cosine similarity.
-6. The intent router walks the rule table by priority; the first enabled match that clears the
-   speaker's role floor wins. No match → the local LLM, if you have enabled it.
+6. The intent router walks the rule table by priority; the first enabled rule that matches wins.
+   If the speaker's role is below that rule's floor, the answer is a refusal — later rules are
+   not tried. No match → the local LLM, if you have enabled it.
 7. Piper speaks the reply. Everything — speaker, scores, transcript, intent, per-stage latency —
    lands in the history table.
 
@@ -78,15 +104,59 @@ One utterance, end to end:
 
 ## Quickstart
 
+You need `curl`, `tar`, `python3` (3.11 or newer) and systemd on the target; the installer
+adds `python3-venv`, `libportaudio2` and `alsa-utils` through `apt-get` if they are missing.
+Building the server needs Go (the version in [`server/go.mod`](server/go.mod)) and Node.js 20
+for the web UI.
+
 ```bash
 git clone https://github.com/t0mer/renfild.git
 cd renfild
+make web build      # build the web UI, then the server binary with the UI embedded
 sudo ./install.sh
 ```
 
 The installer creates the `renfild` system user, builds the Python virtualenvs, downloads
 Piper and a voice, installs three systemd units and starts them. It is idempotent — re-run
 it to upgrade, and it will never overwrite a config file you have edited.
+
+It takes the server binary from `server/renfild` if you built one, otherwise from a binary in
+`dist/` — built with `make dist`, or downloaded from a GitHub release once one is published. If neither exists and Go is installed, it compiles the
+server itself — but **without the web UI**, which the browser then reports as not built into
+the binary. Run `make web build` first to avoid that.
+
+<details>
+<summary>Installer options</summary>
+
+| Option | Effect |
+|---|---|
+| `--skip-server` | Do not install the Go server |
+| `--skip-satellite` | Do not install the satellite daemon (e.g. a server-only box) |
+| `--skip-embedder` | Do not install the speaker embedder |
+| `--skip-piper` | Do not download the Piper binary or voice |
+| `--no-start` | Install and enable the units, but do not start them |
+| `--help` | Show usage |
+
+| Environment variable | Default | Effect |
+|---|---|---|
+| `PREFIX` | `/opt/renfild` | Install location |
+| `DATA_DIR` | `/var/lib/renfild` | Database, secret key and retained audio |
+| `SERVICE_USER` | `renfild` | System user the services run as |
+| `PIPER_VOICE` | `en_US-lessac-medium` | Voice to download from rhasspy/piper-voices |
+| `PIPER_VOICE_URL` | derived from the name | Explicit download directory for the voice |
+| `PIPER_ENGINE` | `auto` | `cpp`, `python` or `auto` (`python` for `he_*` voices) |
+| `PIPER_VERSION` | `2023.11.14-2` | rhasspy/piper release for the `cpp` engine |
+| `PIPER_TTS_VERSION` | `1.7.0` | piper1-gpl (`piper-tts`) version for the `python` engine |
+| `SILERO_VAD_URL` | the silero-vad repository | Where the Silero VAD model is fetched from |
+
+`PREFIX`, `DATA_DIR` and `SERVICE_USER` only change where the installer puts files. The config
+it copies and the three systemd units still hard-code `/opt/renfild`, `/var/lib/renfild` and
+`User=renfild`, so non-default values also mean editing `server.yaml` (`db`, `audio_dir`,
+`secret_key_file`) and the three unit files to match.
+
+Supported architectures: arm64, armv7 and amd64.
+
+</details>
 
 Then:
 
@@ -140,6 +210,11 @@ ECAPA-TDNN model is Python-only — all the matching logic lives in the Go serve
 curl -s --data-binary @sample.wav -H 'Content-Type: audio/wav' \
   http://127.0.0.1:8100/embed | head -c 200
 ```
+
+`POST /embed` takes a raw WAV body and returns `{"embedding": [...], "duration_s": …, "dims": 192}`;
+audio shorter than `MIN_DURATION_S` is rejected with `422`, and a request made while the model
+is still loading gets `503`. `GET /healthz` reports `ok` or `loading`, and the OpenAPI docs are
+served at `/api/docs`.
 
 > **Note** SpeechBrain pulls in PyTorch. On arm64 the installer uses the **CPU-only** wheels
 > from PyTorch's own index (~1.5 GB on disk) — the default PyPI wheels drag in several
@@ -329,8 +404,9 @@ The gap between the two matters more than the absolute numbers.
 
 #### What the scores look like in practice
 
-`hack/speaker-eval.py` enrolls a set of voices, then identifies held-out clips of each and
-prints the score matrix. Run against four enrolled speakers plus one who is not enrolled:
+`hack/speaker-eval.py` enrolls a set of voices through a running server (`--server`, default
+`http://127.0.0.1:8080`), then identifies held-out clips of each and prints the score matrix;
+the last voice you pass is kept back as the unenrolled stranger. Run against four enrolled speakers plus one who is not enrolled:
 
 | | own voice | best impostor | unenrolled stranger's best |
 |---|---|---|---|
@@ -385,6 +461,27 @@ Handler configuration is JSON:
 Templates get `{{.Speaker}}`, `{{.Role}}`, `{{.Transcript}}`, `{{.SatelliteID}}`,
 `{{.Confidence}}`, `{{.Known}}` and `{{.Now}}`.
 
+The full set of handler fields:
+
+| Handler | Field | Meaning |
+|---|---|---|
+| `reply` | `template` | Required. The text to speak |
+| `webhook` | `url` | Required. Templated |
+| | `method` | Default `POST` |
+| | `headers` | Map of request headers; values are encrypted at rest |
+| | `body` | Templated request body |
+| | `content_type` | Default `application/json` when there is a body |
+| | `timeout_seconds` | Per-call timeout (the HTTP client caps every call at 10 s) |
+| | `speak_response` | Speak the response body (first 4 KB) |
+| | `reply` | Templated text to speak instead, when `speak_response` is off |
+| `llm` | `system_prompt` | Overrides the default system prompt |
+| | `max_words` | Overrides `ollama.max_words` |
+| | `prompt` | Templated prompt; defaults to the transcript |
+
+A webhook that returns a status of 400 or above counts as a failure. A fresh database comes with
+two harmless rules — `greeting` and `what time is it`, in English and Hebrew — so the assistant
+answers something before you have written your own.
+
 `handler_config` is checked against the handler that will read it when you save the rule, and
 the templates are parsed at the same time — a missing `template`, a webhook with no `url` or
 an unclosed `{{` comes back as an error in the editor rather than as a spoken *"Sorry,
@@ -404,11 +501,16 @@ something went wrong"* the next time someone triggers the rule.
 
 The installer downloads one voice from
 [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices); the URL is derived from
-the name, so picking another one is a single setting:
+the name, so fetching another one is a single variable:
 
 ```bash
 sudo PIPER_VOICE=he_IL-saspeech-medium ./install.sh --skip-satellite --skip-embedder --skip-server
 ```
+
+The installer only rewrites the `piper` block of `server.yaml` on the run that creates the file.
+On an existing install it prints the values instead: set `piper.engine`, `piper.binary` and
+`piper.voice` (`/opt/renfild/piper/voices/<name>.onnx`) yourself, then
+`sudo systemctl restart renfild-server`.
 
 ### Hebrew
 
@@ -514,9 +616,20 @@ way: an unreachable or missing model produces a spoken *"Sorry, something went w
 
 ## Configuration reference
 
-Precedence everywhere: **flags > environment > config file > defaults**.
+Precedence everywhere: **flags > environment > config file > defaults** — with one exception
+for the server's runtime settings, below.
+
+The six settings the web UI can change (speaker threshold, unknown-voice policy,
+low-confidence margin, LLM fallback, minimum sample similarity and enrollment samples) are
+stored in the database once you save them on the **Settings** page. The server applies the
+stored values at startup after reading its configuration, so from then on they win over
+flags, environment variables and `server.yaml` alike.
 
 ### server — `/opt/renfild/etc/server.yaml` (env prefix `RENFILD_`)
+
+Environment variables are the key path in upper case with dots replaced by underscores:
+`whisper.url` → `RENFILD_WHISPER_URL`. The systemd unit also reads
+`/opt/renfild/etc/server.env` if it exists, which is the place for them.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -526,15 +639,18 @@ Precedence everywhere: **flags > environment > config file > defaults**.
 | `audio_retention` | `none` | `none`, `24h`, `7d` — raw audio retention for debugging |
 | `audio_dir` | `/var/lib/renfild/audio` | Where retained audio is written |
 | `secret_key_file` | `/var/lib/renfild/secret.key` | AES-256 key for webhook credentials; generated on first start |
-| `secret_key` | — | The same key as hex (`RENFILD_SECRET_KEY`), instead of a file |
-| `whisper.url` | `http://127.0.0.1:9000` | Whisper endpoint. **There is no working default — point this at your own.** |
+| `secret_key` | — | The same key as hex, instead of a file. Wins over `secret_key_file` |
+| `whisper.url` | `http://127.0.0.1:9000` | Whisper endpoint. Nothing runs there unless you install one — [`hack/whisper-server.sh`](hack/whisper-server.sh) uses this port — so point it at your own |
 | `whisper.api` | `openai` | `openai` (`/v1/audio/transcriptions`) or `asr` (whisper-asr-webservice) |
 | `whisper.model` | `whisper-1` | Model name, for the OpenAI shape |
 | `whisper.language` | `auto` | `he`, `en`, … or `auto` |
+| `whisper.api_key` | — | Only if your endpoint requires one |
 | `whisper.timeout` | `20s` | Per-request timeout |
 | `embedder.url` | `http://127.0.0.1:8100` | Embedder sidecar |
+| `embedder.timeout` | `15s` | Per-request timeout |
 | `ollama.url` | `http://127.0.0.1:11434` | Ollama endpoint |
 | `ollama.model` | `qwen2.5:7b` | Model for the `llm` handler |
+| `ollama.timeout` | `30s` | Per-request timeout |
 | `ollama.max_words` | `60` | Hard cap on spoken answers |
 | `ollama.fallback` | `true` | Route unmatched transcripts to the model |
 | `ollama.system_prompt_file` | — | Optional file with your own system prompt |
@@ -544,51 +660,112 @@ Precedence everywhere: **flags > environment > config file > defaults**.
 | `piper.speaker_id` | `0` | For multi-speaker voices |
 | `piper.persistent` | `true` | Keep one Piper process alive between replies. Worth about a second per reply |
 | `piper.timeout` | `10s` | Per-reply timeout |
+| `piper.extra_args` | — | Extra arguments passed to Piper verbatim, e.g. `["--length_scale", "1.0"]` (`--length-scale` on the `python` engine) |
 | `speaker.default_threshold` | `0.45` | Cosine similarity floor |
 | `speaker.unknown_policy` | `restricted` | See the table above |
 | `speaker.low_confidence_margin` | `0.05` | Within this of the threshold, the command audio also gets a vote |
-| `speaker.enrollment_samples` | `5` | Prompts in the enrollment wizard |
+| `speaker.enrollment_samples` | `5` | Sample count the enrollment wizard reports progress against |
 | `speaker.min_sample_similarity` | `0.30` | Enrollment samples below this are rejected |
 
-Flags: `--listen --db --log-level --audio-retention --audio-dir --whisper-url --whisper-api
---whisper-language --embedder-url --ollama-url --ollama-model --piper-engine --piper-binary
---piper-voice --piper-persistent --speaker-threshold --unknown-policy --config`.
+> **Keys without a default** (`secret_key`, `whisper.api_key`, `ollama.system_prompt_file`,
+> `piper.extra_args`) are only picked up from the environment when the key is also present in
+> `server.yaml` — even as an empty string such as `secret_key: ""`. Set them in the file, or add
+> the empty key before relying on `RENFILD_SECRET_KEY` or `RENFILD_WHISPER_API_KEY`.
+
+The binary is `renfild`; running it with no subcommand is the same as `renfild serve`, which is
+what the systemd unit runs. `--version` prints the build version and `--help` lists the flags.
+
+| Flag | Config key |
+|---|---|
+| `--config` | Path to `server.yaml` |
+| `--listen` | `listen` |
+| `--db` | `db` |
+| `--log-level` | `log_level` |
+| `--audio-retention` | `audio_retention` |
+| `--audio-dir` | `audio_dir` |
+| `--whisper-url` | `whisper.url` |
+| `--whisper-api` | `whisper.api` |
+| `--whisper-language` | `whisper.language` |
+| `--embedder-url` | `embedder.url` |
+| `--ollama-url` | `ollama.url` |
+| `--ollama-model` | `ollama.model` |
+| `--piper-engine` | `piper.engine` |
+| `--piper-binary` | `piper.binary` |
+| `--piper-voice` | `piper.voice` |
+| `--piper-persistent` | `piper.persistent` |
+| `--speaker-threshold` | `speaker.default_threshold` |
+| `--unknown-policy` | `speaker.unknown_policy` |
+
+Only flags you actually pass take effect, so an unset flag never overrides the config file.
 
 ### satellite — `/opt/renfild/etc/satellite.yaml` (env prefix `RENFILD_SAT_`, nested keys use `__`)
 
 | Key | Default | Meaning |
 |---|---|---|
 | `satellite_id` | `living-room` | Identifies this satellite in history and metrics |
+| `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `server.url` | `http://127.0.0.1:8080` | Where the brain lives |
 | `server.timeout_s` | `15` | Request timeout |
+| `server.retries` | `1` | Retries on a connection error |
 | `audio.input_device` | `USB` | **Name substring**, never an index — indexes move between reboots |
 | `audio.output_device` | `USB` | Same, for playback |
 | `audio.sample_rate` | `16000` | Fixed by the models |
 | `audio.frame_ms` | `80` | 1280 samples — openWakeWord's chunk size |
 | `audio.ring_seconds` | `2.0` | Snapshot handed to speaker identification |
-| `wake.model_path` | `models/renfild.onnx` | Your trained wake word (`.onnx` or `.tflite`) |
+| `audio.input_gain` | `1.0` | Capture gain |
+| `audio.output_volume` | `1.0` | Playback volume |
+| `wake.model_path` | `models/hey_renfild.onnx` | Your trained wake word (`.onnx` or `.tflite`). The shipped config uses the absolute path under `/opt/renfild/satellite/models/` |
 | `wake.threshold` | `0.6` | Raise it if the TV sets it off |
 | `wake.debounce_s` | `3.0` | Suppress re-triggers after a detection |
+| `wake.inference_framework` | `auto` | `auto` picks `tflite` or `onnx` from the file extension |
+| `wake.resources_dir` | — | Directory with openWakeWord's shared melspectrogram and embedding models |
+| `wake.enabled` | `true` | Wake word detection on or off |
 | `vad.model_path` | `models/silero_vad.onnx` | Silero VAD; falls back to an energy gate if missing |
+| `vad.threshold` | `0.5` | Speech probability threshold |
 | `vad.trailing_silence_ms` | `700` | End-of-command silence |
 | `vad.max_command_s` | `10.0` | Hard cap on one command |
 | `vad.start_timeout_s` | `4.0` | No speech within this → false trigger, abort quietly |
+| `vad.fallback_rms` | `0.012` | Energy floor used only when the Silero model is unavailable |
 | `chimes.enabled` | `true` | Local feedback sounds (synthesised, no files needed) |
+| `chimes.volume` | `0.35` | Chime volume |
+| `chimes.listening` / `chimes.ack` / `chimes.error` | — | Optional WAV files to use instead of the synthesised chimes |
 | `dump_dir` | — | Write `wake.wav`/`command.wav` for every detection |
 | `offline` | `false` | Capture and dump only; never contact the server |
 
-Example: `RENFILD_SAT_WAKE__THRESHOLD=0.7` overrides `wake.threshold`.
+Example: `RENFILD_SAT_WAKE__THRESHOLD=0.7` overrides `wake.threshold`. The config file is
+taken from `RENFILD_SAT_CONFIG` (the systemd unit sets it to `/opt/renfild/etc/satellite.yaml`),
+then `./config.yaml`, then `/opt/renfild/etc/satellite.yaml`. The unit also reads
+`/opt/renfild/etc/satellite.env` if it exists.
+
+Command-line options for `python -m satellite`:
+
+| Option | Meaning |
+|---|---|
+| `--config PATH` | Config file to load |
+| `--log-level LEVEL` | Overrides `log_level` |
+| `--offline` | Overrides `offline` |
+| `--dump-dir PATH` | Overrides `dump_dir` |
+| `--input-wav PATH` | Replay a WAV file instead of opening the microphone |
+| `--list-devices` | Print the audio devices and exit |
+| `--version` | Print the version and exit |
 
 ### embedder — `/opt/renfild/etc/embedder.env` (env prefix `RENFILD_EMB_`)
 
 | Key | Default | Meaning |
 |---|---|---|
 | `HOST` / `PORT` | `127.0.0.1` / `8100` | Bind address — localhost by default, since only the server talks to it |
+| `LOG_LEVEL` | `INFO` | Log level |
 | `MODEL_SOURCE` | `speechbrain/spkrec-ecapa-voxceleb` | HuggingFace id or a local directory |
 | `MODEL_DIR` | `models/spkrec-ecapa-voxceleb` | Weight cache; offline after the first start |
+| `DEVICE` | `cpu` | Inference device |
 | `TORCH_THREADS` | `3` | Leave a core for the rest of the stack |
 | `MIN_DURATION_S` | `0.5` | Shorter audio is rejected with 422 |
+| `MAX_DURATION_S` | `30.0` | Longer audio is centre-cropped to this |
+| `MAX_UPLOAD_BYTES` | `16777216` | Request body cap (16 MB); larger uploads get 413 |
 | `STUB` | `false` | Serve fake embeddings (tests only) |
+
+Each key is set as `RENFILD_EMB_<KEY>`, e.g. `RENFILD_EMB_PORT=8100`. The embedder also reads
+a `.env` file from its working directory.
 
 ---
 
@@ -596,26 +773,51 @@ Example: `RENFILD_SAT_WAKE__THRESHOLD=0.7` overrides `wake.threshold`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/utterance` | Satellite endpoint. `multipart/form-data`: `wake`, `command`, `satellite_id`. Returns `200` + `audio/wav`, or `204` when there is nothing to say. Headers: `X-Speaker`, `X-Transcript`, `X-Intent`, `X-Confidence` (percent-encoded UTF-8). |
-| `GET` | `/healthz` | Liveness, with the version |
-| `GET` | `/metrics` | Prometheus: utterance counts by speaker/intent/outcome, per-stage latency histograms, match-confidence histogram |
+| `POST` | `/api/v1/utterance` | Satellite endpoint. `multipart/form-data`: `wake`, `command`, `satellite_id`. Returns `200` + `audio/wav`, or `204` when there is nothing to say. Headers: `X-Speaker`, `X-Transcript`, `X-Intent` (percent-encoded UTF-8) and `X-Confidence` (a decimal). Uploads are capped at 25 MB. |
+| `GET` | `/healthz` | Liveness, with the version; `503` if the database is unreachable |
+| `GET` | `/metrics` | Prometheus metrics — see [Monitoring](#monitoring) |
+| `GET` | `/api/ui/stats` | Dashboard summary |
+| `GET/POST` | `/api/ui/speakers` | List and create speakers |
+| `GET/PUT/DELETE` | `/api/ui/speakers/{id}` | Read, update and delete a speaker |
+| `GET/POST` | `/api/ui/speakers/{id}/enrollments` | List and add enrollment samples |
+| `DELETE` | `/api/ui/speakers/{id}/enrollments/{enrollmentID}` | Remove one sample |
+| `POST` | `/api/ui/speakers/identify` | "Test my voice" — embed and match, storing nothing |
+| `GET/POST` | `/api/ui/intents` | List and create rules |
+| `POST` | `/api/ui/intents/reorder` | Change rule priorities |
+| `GET/PUT/DELETE` | `/api/ui/intents/{id}` | Read, update and delete a rule |
+| `GET` | `/api/ui/history` | Utterance history. Query: `speaker`, `intent`, `q` (search), `limit` (default 50), `offset` |
+| `GET` | `/api/ui/history/{id}/audio` | Retained command audio, when `audio_retention` is on |
+| `GET` | `/api/ui/events` | Server-Sent Events stream of live utterances |
+| `GET/PUT` | `/api/ui/settings` | Runtime settings (thresholds, policies, LLM fallback), plus the read-only values from the config file |
+| `POST` | `/api/ui/test/tts` · `/api/ui/test/intent` | Dry runs for the UI |
+
+Everything else is served by the embedded single-page app. None of these endpoints require
+authentication — see [Privacy](#privacy).
+
+---
+
+## Monitoring
+
+`GET /metrics` exposes, besides the standard Go and process collectors:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `renfild_utterances_total` | counter | `speaker`, `intent`, `outcome` (`ok`, `denied`, `error`) |
+| `renfild_stage_duration_seconds` | histogram | `stage` (`speakerid`, `speakerid_second`, `stt`, `intent`, `tts`) |
+| `renfild_stage_errors_total` | counter | `stage` |
+| `renfild_utterance_duration_seconds` | histogram | — end-to-end latency |
+| `renfild_speaker_match_confidence` | histogram | — cosine similarity of the best match |
 
 A Grafana dashboard over these metrics lives in [`grafana/`](grafana/), with the scrape
 config and import instructions.
-| `GET/POST/PUT/DELETE` | `/api/ui/speakers…` | Speaker and enrollment management |
-| `POST` | `/api/ui/speakers/identify` | "Test my voice" — embed and match, storing nothing |
-| `GET/POST/PUT/DELETE` | `/api/ui/intents…` | Rule table CRUD, plus `/reorder` |
-| `GET` | `/api/ui/history` | Utterance history with paging, search and filters |
-| `GET` | `/api/ui/events` | Server-Sent Events stream of live utterances |
-| `GET/PUT` | `/api/ui/settings` | Runtime settings (thresholds, policies, LLM fallback) |
-| `POST` | `/api/ui/test/tts` · `/api/ui/test/intent` | Dry runs for the UI |
 
 ---
 
 ## Privacy
 
-- Everything runs on your LAN. Nothing is sent anywhere at runtime; the only downloads are
-  models, at install time.
+- Everything runs on your LAN. Nothing is sent anywhere at runtime except to the webhooks you
+  configure yourself; the only downloads are models — at install time, plus the ECAPA weights
+  on the embedder's first start.
 - **Raw audio is not stored by default** (`audio_retention: none`). Turn it on only while
   debugging.
 - **Transcripts and voice embeddings are stored** in `/var/lib/renfild/renfild.db`. The
@@ -630,10 +832,16 @@ config and import instructions.
   configured for. Everything else about the rule, the URL and body included, stays readable.
 - The key lives in `secret_key_file` (`/var/lib/renfild/secret.key`, mode `0600`, generated on
   first start). **Back it up with the database**: restoring one without the other leaves the
-  stored credentials unreadable and you will have to retype them. `RENFILD_SECRET_KEY` supplies
-  the same key as hex if you would rather not keep a file.
+  stored credentials unreadable and you will have to retype them. `secret_key` supplies the
+  same key as hex if you would rather not keep a file (see the note under
+  [Configuration reference](#configuration-reference) before using `RENFILD_SECRET_KEY`).
 - The database itself is still worth protecting — it holds transcripts and embeddings. The
-  installer leaves it at `0640` owned by the `renfild` user.
+  installer creates `/var/lib/renfild` as `0750`, owned by the `renfild` user; retained audio
+  is written `0640`.
+- The embedder has no authentication either and binds to `127.0.0.1` by default. Keep it that
+  way unless it runs on a separate host on a trusted network.
+- The systemd units run as the unprivileged `renfild` user with `NoNewPrivileges`,
+  `ProtectSystem=full` and `ProtectHome` hardening.
 
 ---
 
@@ -729,6 +937,53 @@ shows the progress; subsequent starts are offline and take a few seconds.
 
 ---
 
+## Development
+
+```
+server/           Go server: cmd/ (CLI), internal/ (api, pipeline, intent, speaker, store, …)
+server/web/       React + TypeScript + Vite web UI, built into server/internal/webui/dist
+satellite/        Python wake word and capture daemon
+embedder/         Python ECAPA-TDNN embedding sidecar (FastAPI)
+grafana/          Grafana dashboard for the Prometheus metrics
+hack/             End-to-end check, screenshots, wake word and speaker evaluation tools
+scripts/          Build, dev and version scripts
+install.sh        Native installer
+```
+
+`make help` lists every target:
+
+| Target | What it does |
+|---|---|
+| `make venvs` | Create the Python virtualenvs for the satellite and embedder |
+| `make web` | Build the React UI into the Go embed directory |
+| `make build` | Build `server/renfild` for this machine, UI embedded |
+| `make dist` | Build the UI, then cross-compile release binaries and checksums into `dist/` |
+| `make dev` | Run the server and the Vite dev server together, with hot reload |
+| `make run-server` / `run-satellite` | Run the server or satellite against its example config |
+| `make run-embedder` | Run the embedder with its built-in defaults, or `embedder/.env` if present |
+| `make test` | Go and Python test suites (`test-go`, `test-python`) |
+| `make cover` | Go tests with per-package coverage |
+| `make e2e` | End-to-end pipeline check with mocked Whisper, embedder and Piper |
+| `make lint` | `go vet`, `gofmt` and `ruff` |
+| `make tidy` | `go mod tidy` for the server |
+| `make install` | `sudo ./install.sh` |
+| `make clean` | Remove build output |
+
+`make run-server` and `make dev` use `server/config.example.yaml` and a `dev.db` in the
+repository root. The Python tests run with the embedder stubbed (`RENFILD_EMB_STUB=1`), so
+they never download model weights. [`hack/screenshots.sh`](hack/screenshots.sh) regenerates
+the README screenshots against a throwaway database, using a headless Chromium.
+
+Versions follow `YYYY.M.PATCH`. The **Release** workflow (manual dispatch) runs the Go tests,
+builds the UI, cross-compiles the server for Linux (amd64, arm64, armv7, armv6, 386), macOS
+(amd64, arm64) and Windows (amd64, arm64), tags the commit and attaches the binaries and a
+checksum file to a GitHub release. Only the server is released as a binary; the satellite and
+embedder are installed from source by `install.sh`. CI runs `go vet`, `gofmt`, the Go tests,
+the end-to-end check, the web build, and `ruff` and `pytest` for both Python components; a
+security workflow runs Trivy and `govulncheck`.
+
+---
+
 ## Roadmap
 
 - Barge-in (interrupting playback by speaking) — deliberately out of scope for v1.
@@ -736,6 +991,11 @@ shows the progress; subsequent starts are offline and take a few seconds.
   them yet.
 - More intent handlers — MQTT and `exec` are one file each, by design.
 - Streaming speech to text.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `make lint test e2e` before opening a pull
+request, and keep changes to one concern each.
 
 ## License
 
